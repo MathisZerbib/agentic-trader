@@ -39,6 +39,11 @@ import urllib.request
 
 
 load_dotenv()
+
+# Trading Configuration
+TAKE_PROFIT_PERCENTAGE = 0.05  # 5%
+STOP_LOSS_PERCENTAGE = -0.03   # -3%
+
 models.Base.metadata.create_all(bind=engine)
 app = FastAPI(title="Grok Trading Bot")
 app.add_middleware(
@@ -752,11 +757,12 @@ async def manage_existing_positions(db: Session):
         positions = trading_client.get_all_positions()
         for pos in positions:
             symbol = pos.symbol
-            unrealized_plpc = float(pos.unrealized_intraday_plpc) if hasattr(pos, 'unrealized_intraday_plpc') else 0.0
+            # Use total unrealized P/L % instead of intraday
+            unrealized_plpc = float(pos.unrealized_plpc) if hasattr(pos, 'unrealized_plpc') else 0.0
             
             # TP/SL Thresholds
-            tp_threshold = 0.05  # +5%
-            sl_threshold = -0.03 # -3%
+            tp_threshold = TAKE_PROFIT_PERCENTAGE
+            sl_threshold = STOP_LOSS_PERCENTAGE
             
             action = None
             if unrealized_plpc >= tp_threshold:
