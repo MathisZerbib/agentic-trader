@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+alpaca-py
+openai
+sqlalchemy
+python-dotenv
+apscheduler
+pydantic
+requests
