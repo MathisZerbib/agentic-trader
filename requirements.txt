@@ -7,3 +7,4 @@ python-dotenv
 apscheduler
 pydantic
 requests
+pytz

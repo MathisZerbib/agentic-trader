@@ -1,6 +1,146 @@
 import json
+import os
+from dotenv import load_dotenv
 from datetime import datetime
 import asyncio
+from openai import AsyncOpenAI
+import urllib.request
+
+load_dotenv()
+LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "local-model")
+LOCAL_LLM_URL = os.getenv("LOCAL_LLM_URL")
+DEFAULT_GROK_MODEL = os.getenv("GROK_MODEL", "x-ai/grok-4.1-fast")
+LM_STUDIO_API_TOKEN = os.getenv("LM_API_TOKEN") or os.getenv("LM_STUDIO_API_KEY")
+
+# Circuit breaker flag for OpenRouter 402 errors
+USE_LOCAL_FALLBACK = False
+
+async def call_local_llm(system_prompt, user_prompt):
+    # Prioritize configured URL and support both LM Studio API and OpenAI-compatible paths.
+    seed_urls = [
+        LOCAL_LLM_URL,
+        "http://host.docker.internal:1234/v1/chat/completions",
+        "http://localhost:1234/v1/chat/completions",
+    ]
+    chat_urls = []
+    for raw_url in seed_urls:
+        if not raw_url:
+            continue
+
+        clean_url = raw_url.rstrip("/")
+        if clean_url.endswith("/chat/completions"):
+            chat_urls.append(clean_url)
+            chat_urls.append(clean_url.replace("/v1/chat/completions", "/api/v1/chat/completions"))
+        elif clean_url.endswith("/v1"):
+            root_url = clean_url[:-3]
+            chat_urls.append(f"{root_url}/api/v1/chat/completions")
+            chat_urls.append(f"{clean_url}/chat/completions")
+        else:
+            chat_urls.append(f"{clean_url}/api/v1/chat/completions")
+            chat_urls.append(f"{clean_url}/v1/chat/completions")
+
+    # Remove duplicates while preserving order.
+    chat_urls = list(dict.fromkeys(chat_urls))
+
+    async def _post_chat_completion(endpoint: str, payload: dict) -> str:
+        def _do_request() -> str:
+            body = json.dumps(payload).encode("utf-8")
+            request = urllib.request.Request(endpoint, data=body, method="POST")
+            request.add_header("Content-Type", "application/json")
+            if LM_STUDIO_API_TOKEN:
+                request.add_header("Authorization", f"Bearer {LM_STUDIO_API_TOKEN}")
+
+            with urllib.request.urlopen(request, timeout=30) as response:
+                response_data = json.loads(response.read().decode("utf-8"))
+
+            choices = response_data.get("choices") or []
+            if choices and isinstance(choices[0], dict):
+                message = choices[0].get("message") or {}
+                if isinstance(message, dict) and message.get("content"):
+                    return message["content"]
+
+            raise ValueError(f"Unexpected LM Studio response payload keys: {list(response_data.keys())}")
+
+        return await asyncio.to_thread(_do_request)
+
+    for endpoint in chat_urls:
+        try:
+            print(f"Calling Local LLM at {endpoint}...")
+
+            # First try with json_object, but be ready to fallback to text.
+            try:
+                # Truncate inputs if they're too large for local models.
+                if len(system_prompt) + len(user_prompt) > 12000:  # Rough char count for ~3-4k tokens
+                    print("Truncating prompt for local model context limit...")
+                    user_prompt = user_prompt[:8000] + "...(truncated)"
+
+                content = await _post_chat_completion(
+                    endpoint,
+                    {
+                        "model": LOCAL_LLM_MODEL,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        "response_format": {"type": "json_object"},
+                        "max_tokens": 768,
+                    },
+                )
+            except Exception as e_format:
+                if "response_format" in str(e_format) or "400" in str(e_format):
+                    print(f"Local LLM issue (format/context), retrying with text format...")
+                    # Aggressive truncation for fallback.
+                    if len(system_prompt) + len(user_prompt) > 8000:
+                        user_prompt = user_prompt[:5000] + "...(truncated)"
+
+                    content = await _post_chat_completion(
+                        endpoint,
+                        {
+                            "model": LOCAL_LLM_MODEL,
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                            "max_tokens": 768,
+                        },
+                    )
+                else:
+                    raise e_format
+
+            # Clean markdown code blocks if present
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0]
+            elif "```" in content:
+                content = content.split("```")[1]
+            
+            # Clean double braces {{ ... }} sometimes produced by smaller models
+            content = content.strip()
+            if content.startswith("{{") and content.endswith("}}"):
+                content = content.replace("{{", "{").replace("}}", "}")
+            
+            return json.loads(content)
+        except (json.JSONDecodeError, ValueError):
+            # 2. Try regex-like finder for { ... }
+            try:
+                start = content.find("{")
+                end = content.rfind("}") + 1
+                if start != -1 and end != 0:
+                    json_str = content[start:end]
+                    # Double brace cleanup for extracted string too
+                    if json_str.startswith("{{") and json_str.endswith("}}"):
+                        json_str = json_str.replace("{{", "{").replace("}}", "}")
+                    return json.loads(json_str)
+                return json.loads(content.strip()) # Last ditch effort
+            except:
+                raise ValueError(f"Could not extract JSON from text response: {content[:100]}...")
+
+        except Exception as fallback_error:
+            print(f"Fallback attempt to {endpoint} failed: {fallback_error}")
+            continue
+    
+    print("All fallback attempts failed.")
+    return {}
+
 from agent_prompts import (
     STRATEGIST_SYSTEM_PROMPT, STRATEGIST_TASK_TEMPLATE,
     ANALYST_SYSTEM_PROMPT, ANALYST_TASK_TEMPLATE,
@@ -12,11 +152,16 @@ from agent_prompts import (
 )
 
 class BaseAgent:
-    def __init__(self, client, model="x-ai/grok-4.1-fast"):
+    def __init__(self, client, model=DEFAULT_GROK_MODEL):
         self.client = client
         self.model = model
 
     async def _call_llm(self, system_prompt, user_prompt):
+        global USE_LOCAL_FALLBACK
+        
+        if USE_LOCAL_FALLBACK:
+            return await call_local_llm(system_prompt, user_prompt)
+            
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -31,8 +176,15 @@ class BaseAgent:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"LLM Error: {e}")
-            return None
+            # Check for 402 Insufficient credits or generic API errors
+            error_msg = str(e).lower()
+            if "402" in error_msg or "insufficient credits" in error_msg:
+                print(f"LLM Error (402): {e}. PERMANENTLY Switching to fallback model ({LOCAL_LLM_MODEL}).")
+                USE_LOCAL_FALLBACK = True
+                return await call_local_llm(system_prompt, user_prompt)
+            else:
+                print(f"LLM Error: {e}")
+                return {}
 
 class Strategist(BaseAgent):
     async def get_regime(self, market_data, portfolio_state):

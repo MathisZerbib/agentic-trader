@@ -27,8 +27,19 @@ from openai import AsyncOpenAI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import models
+import agents
 from database import SessionLocal, engine
-from ai_trader import get_latest_news, format_news_for_prompt, get_social_sentiment, format_sentiment_for_prompt, get_active_stocks
+from ai_trader import (
+    format_news_for_prompt,
+    format_sentiment_for_prompt,
+    format_tavily_for_prompt,
+    get_active_stocks,
+    get_latest_news,
+    get_macro_web_research,
+    get_social_sentiment,
+    get_ticker_web_research,
+    shortlist_candidates_for_web_research,
+)
 import agent_prompts
 
 from starlette.websockets import WebSocketState
@@ -36,13 +47,21 @@ from starlette.websockets import WebSocketState
 import csv
 import io
 import urllib.request
+import agents # Ensure agents is imported at the start of the function scope
 
 
 load_dotenv()
+LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "local-model")
+LOCAL_LLM_URL = os.getenv("LOCAL_LLM_URL", "http://host.docker.internal:1234/v1")
 
 # Trading Configuration
 TAKE_PROFIT_PERCENTAGE = 0.05  # 5%
 STOP_LOSS_PERCENTAGE = -0.03   # -3%
+WEB_RESEARCH_ENABLED = os.getenv("WEB_RESEARCH_ENABLED", "true").lower() == "true"
+WEB_RESEARCH_MAX_TICKERS = int(os.getenv("WEB_RESEARCH_MAX_TICKERS", "3"))
+WEB_RESEARCH_MACRO_MAX_RESULTS = int(os.getenv("WEB_RESEARCH_MACRO_MAX_RESULTS", "6"))
+WEB_RESEARCH_TICKER_MAX_RESULTS = int(os.getenv("WEB_RESEARCH_TICKER_MAX_RESULTS", "5"))
+WEB_RESEARCH_DAYS = int(os.getenv("WEB_RESEARCH_DAYS", "3"))
 
 models.Base.metadata.create_all(bind=engine)
 app = FastAPI(title="Grok Trading Bot")
@@ -212,17 +231,122 @@ ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 ALPACA_PAPER = os.getenv("ALPACA_PAPER", "True").lower() == "true"
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+XAI_API_KEY = os.getenv("XAI_API_KEY")
+DEFAULT_GROK_MODEL = os.getenv("GROK_MODEL", "x-ai/grok-4.1-fast")
+LM_STUDIO_API_TOKEN = os.getenv("LM_API_TOKEN") or os.getenv("LM_STUDIO_API_KEY")
 
 # Initialize Clients
 trading_client = None
 data_client = None
 grok_client = None
 
+LLM_SETTINGS = {
+    "provider": "grok" if (XAI_API_KEY or OPENROUTER_API_KEY) else "local",
+    "grok_model": DEFAULT_GROK_MODEL,
+    "local_model": LOCAL_LLM_MODEL,
+    "local_url": LOCAL_LLM_URL,
+}
+
+
+def _normalized_local_url(url: str) -> str:
+    return url.replace("/chat/completions", "").rstrip("/")
+
+
+def _sync_local_llm_settings() -> None:
+    agents.LOCAL_LLM_MODEL = LLM_SETTINGS["local_model"]
+    agents.LOCAL_LLM_URL = _normalized_local_url(LLM_SETTINGS["local_url"])
+
+
+def _active_engine_label() -> str:
+    if agents.USE_LOCAL_FALLBACK:
+        return f"local:{agents.LOCAL_LLM_MODEL}"
+    return f"grok:{LLM_SETTINGS['grok_model']}"
+
+
+def _fetch_local_llm_models(local_url: str) -> list[dict]:
+    normalized_url = _normalized_local_url(local_url).strip()
+    if not normalized_url:
+        return []
+
+    candidate_urls = [normalized_url]
+    if "localhost" in normalized_url:
+        candidate_urls.append(normalized_url.replace("localhost", "host.docker.internal"))
+    if "127.0.0.1" in normalized_url:
+        candidate_urls.append(normalized_url.replace("127.0.0.1", "host.docker.internal"))
+
+    models_urls = []
+    for candidate in list(dict.fromkeys(candidate_urls)):
+        root_url = candidate[:-3] if candidate.endswith("/v1") else candidate
+        models_urls.append(f"{root_url}/api/v1/models")
+        models_urls.append(f"{candidate}/models")
+        if not candidate.endswith("/v1"):
+            models_urls.append(f"{candidate}/v1/models")
+
+    payload = None
+    last_error = None
+    for models_url in list(dict.fromkeys(models_urls)):
+        try:
+            request = urllib.request.Request(models_url)
+            if LM_STUDIO_API_TOKEN:
+                request.add_header("Authorization", f"Bearer {LM_STUDIO_API_TOKEN}")
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+                break
+        except Exception as e:
+            last_error = e
+            continue
+
+    if payload is None:
+        print(f"Error fetching LM Studio models from {normalized_url}: {last_error}")
+        return []
+
+    raw_models = []
+    if isinstance(payload, dict):
+        raw_models = payload.get("models") or payload.get("data") or []
+
+    discovered_models = []
+    seen_keys = set()
+    for entry in raw_models:
+        if not isinstance(entry, dict):
+            continue
+
+        if entry.get("type") and entry.get("type") != "llm":
+            continue
+
+        model_key = (entry.get("key") or entry.get("id") or entry.get("name") or "").strip()
+        if not model_key or model_key in seen_keys:
+            continue
+
+        seen_keys.add(model_key)
+        loaded_instances = entry.get("loaded_instances") or []
+        discovered_models.append({
+            "key": model_key,
+            "display_name": (entry.get("display_name") or model_key).strip(),
+            "publisher": entry.get("publisher"),
+            "architecture": entry.get("architecture"),
+            "max_context_length": entry.get("max_context_length"),
+            "format": entry.get("format"),
+            "loaded": bool(loaded_instances),
+            "loaded_instances": loaded_instances,
+            "capabilities": entry.get("capabilities"),
+        })
+
+    return discovered_models
+
+
+agents.USE_LOCAL_FALLBACK = LLM_SETTINGS["provider"] == "local"
+_sync_local_llm_settings()
+
 if ALPACA_API_KEY and ALPACA_SECRET_KEY:
     trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=ALPACA_PAPER)
     data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
 
-if OPENROUTER_API_KEY:
+if XAI_API_KEY:
+    grok_client = AsyncOpenAI(
+        base_url="https://api.x.ai/v1",
+        api_key=XAI_API_KEY,
+    )
+elif OPENROUTER_API_KEY:
     grok_client = AsyncOpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=OPENROUTER_API_KEY,
@@ -246,6 +370,13 @@ BOT_ACTIVE = True
 
 class ClosePositionsRequest(BaseModel):
     symbols: list[str]
+
+
+class LLMSettingsUpdateRequest(BaseModel):
+    provider: str
+    grok_model: Optional[str] = None
+    local_model: Optional[str] = None
+    local_url: Optional[str] = None
 
 @app.get("/")
 def read_root():
@@ -299,6 +430,60 @@ async def stop_bot():
     BOT_ACTIVE = False
     await trigger_state_broadcast()
     return {"status": "Bot stopped", "bot_active": BOT_ACTIVE}
+
+
+@app.get("/settings/llm")
+def get_llm_settings():
+    return {
+        "provider": LLM_SETTINGS["provider"],
+        "grok_model": LLM_SETTINGS["grok_model"],
+        "local_model": LLM_SETTINGS["local_model"],
+        "local_url": _normalized_local_url(LLM_SETTINGS["local_url"]),
+        "recommended_grok_model": DEFAULT_GROK_MODEL,
+        "fallback_active": agents.USE_LOCAL_FALLBACK,
+        "active_engine": _active_engine_label(),
+        "openrouter_available": bool(grok_client),
+    }
+
+
+@app.get("/settings/llm/models")
+def get_llm_models(local_url: Optional[str] = None):
+    url = local_url.strip() if local_url and local_url.strip() else LLM_SETTINGS["local_url"]
+    local_models = _fetch_local_llm_models(url)
+    return {
+        "local_models": [model["key"] for model in local_models],
+        "local_models_detail": local_models,
+        "recommended_grok_model": DEFAULT_GROK_MODEL,
+        "local_url": _normalized_local_url(url),
+    }
+
+
+@app.post("/settings/llm")
+def update_llm_settings(payload: LLMSettingsUpdateRequest):
+    provider = payload.provider.lower().strip()
+    if provider not in {"grok", "local"}:
+        raise HTTPException(status_code=400, detail="provider must be 'grok' or 'local'")
+
+    if provider == "grok" and not grok_client:
+        raise HTTPException(status_code=400, detail="Grok provider is not configured (set XAI_API_KEY or OPENROUTER_API_KEY)")
+
+    if payload.grok_model and payload.grok_model.strip():
+        LLM_SETTINGS["grok_model"] = payload.grok_model.strip()
+
+    if payload.local_model and payload.local_model.strip():
+        LLM_SETTINGS["local_model"] = payload.local_model.strip()
+
+    if payload.local_url and payload.local_url.strip():
+        LLM_SETTINGS["local_url"] = payload.local_url.strip()
+
+    LLM_SETTINGS["provider"] = provider
+    agents.USE_LOCAL_FALLBACK = provider == "local"
+    _sync_local_llm_settings()
+
+    return {
+        "status": "LLM settings updated",
+        **get_llm_settings(),
+    }
 
 @app.get("/portfolio")
 def get_portfolio():
@@ -717,7 +902,7 @@ def get_super_advisor_insight():
         """
         
         response = grok_client.chat.completions.create(
-            model="x-ai/grok-4.1-fast",
+            model=LLM_SETTINGS["grok_model"],
             messages=[{"role": "user", "content": prompt}],
             max_tokens=768
         )
@@ -730,9 +915,12 @@ def get_super_advisor_insight():
 # --- Multi-Agent Helpers ---
 
 async def call_grok(system_prompt, user_prompt):
+    if agents.USE_LOCAL_FALLBACK or not grok_client:
+        return await agents.call_local_llm(system_prompt, user_prompt)
+
     try:
         response = await grok_client.chat.completions.create(
-            model="x-ai/grok-4.1-fast",
+            model=LLM_SETTINGS["grok_model"],
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -744,8 +932,14 @@ async def call_grok(system_prompt, user_prompt):
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        print(f"Grok call failed: {e}")
-        return None
+        error_msg = str(e).lower()
+        if "402" in error_msg or "insufficient credits" in error_msg:
+            print(f"Grok call failed (402): {e}. PERMANENTLY Switching to fallback model ({LOCAL_LLM_MODEL}).")
+            agents.USE_LOCAL_FALLBACK = True
+            return await agents.call_local_llm(system_prompt, user_prompt)
+        else:
+            print(f"Grok call failed: {e}")
+            return {}
 
 async def manage_existing_positions(db: Session):
     """
@@ -813,8 +1007,12 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
         db = SessionLocal()
     
     print("Running MULTI-AGENT autonomous cycle...")
-    if not trading_client or not grok_client:
-        print("Clients not initialized")
+    if not trading_client:
+        print("Trading client not initialized")
+        return
+
+    if not grok_client and not agents.USE_LOCAL_FALLBACK:
+        print("LLM client not initialized")
         return
 
     try:
@@ -858,13 +1056,26 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
             for n in news:
                 news_summary += f"{s}: {n['title']} | "
 
+        macro_web_summary = ""
+        if WEB_RESEARCH_ENABLED:
+            macro_web = get_macro_web_research(
+                max_results=WEB_RESEARCH_MACRO_MAX_RESULTS,
+                days=min(WEB_RESEARCH_DAYS, 3),
+            )
+            macro_web_summary = format_tavily_for_prompt("Macro", macro_web, max_items=5)
+
+        combined_regime_context = f"{news_summary}\n{macro_web_summary}".strip()
+
         # 1. REGIME ARBITER PHASE
-        import agents
-        arbiter = agents.RegimeArbiter(grok_client)
+        arbiter = agents.RegimeArbiter(grok_client, model=LLM_SETTINGS["grok_model"])
         indices_data = get_market_data(['SPY', 'QQQ', 'IWM'])
+        # Truncate market_snapshot data to prevent context overflow with small local models
+        if len(indices_data) > 2000:
+            indices_data = indices_data[:2000] + "... (truncated)"
+        
         arbiter_response = await arbiter.determine_regime(
             market_snapshot=indices_data,
-            sentiment_summary=news_summary[:500],
+            sentiment_summary=combined_regime_context[:700],
             vix=vix
         )
         current_regime = arbiter_response.get("regime", "TRENDING")
@@ -891,6 +1102,12 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
         if not candidates:
             candidates = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'AMD', 'META']
 
+        web_research_symbols = set()
+        if WEB_RESEARCH_ENABLED:
+            web_research_symbols = set(
+                shortlist_candidates_for_web_research(candidates, max_count=WEB_RESEARCH_MAX_TICKERS)
+            )
+
         for ticker in candidates:
 
             try:
@@ -905,12 +1122,20 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
                 news_prompt = format_news_for_prompt(ticker, ticker_news)
                 social_sentiment = get_social_sentiment(ticker, max_results=3)
                 sentiment_prompt = format_sentiment_for_prompt(ticker, social_sentiment)
+                tavily_prompt = ""
+                if ticker in web_research_symbols:
+                    web_hits = get_ticker_web_research(
+                        ticker,
+                        max_results=WEB_RESEARCH_TICKER_MAX_RESULTS,
+                        days=WEB_RESEARCH_DAYS,
+                    )
+                    tavily_prompt = format_tavily_for_prompt(ticker, web_hits, max_items=5)
 
                 # Combine news and sentiment for analysis
-                combined_perception = f"{news_prompt}\n{sentiment_prompt}"
+                combined_perception = f"{news_prompt}\n{sentiment_prompt}\n{tavily_prompt}".strip()
 
                 # Optionally, pass this to the Analyst agent or use in trading logic
-                sentiment_agent = agents.SentimentAgent(grok_client)
+                sentiment_agent = agents.SentimentAgent(grok_client, model=LLM_SETTINGS["grok_model"])
                 sentiment_result = await sentiment_agent.analyze_sentiment(ticker, combined_perception)
                 sentiment_analysis = f"Score: {sentiment_result.get('sentiment_score', 0)} | Narrative: {sentiment_result.get('narrative', 'N/A')}"
 
@@ -934,10 +1159,11 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
                     'market_context': f"{current_regime} - {primary_strategy}",
                     'sentiment_analysis': sentiment_analysis,
                     'news': news_prompt,
-                    'social_sentiment': sentiment_prompt
+                    'social_sentiment': sentiment_prompt,
+                    'web_research': tavily_prompt,
                 }
 
-                analyst_agent = agents.Analyst(grok_client)
+                analyst_agent = agents.Analyst(grok_client, model=LLM_SETTINGS["grok_model"])
                 analyst_response = await analyst_agent.analyze_ticker(ticker, price_data)
 
                 if not analyst_response or analyst_response.get("signal") not in ["BUY", "STRONG_BUY", "SELL", "STRONG_SELL"]:
@@ -946,17 +1172,27 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
                 signal = analyst_response["signal"]
                 conviction = analyst_response.get("conviction_score", 0.5)
                 thesis = analyst_response.get("technical_thesis", "")
+                if tavily_prompt:
+                    thesis = f"{thesis}\n\nExternal web evidence:\n{tavily_prompt[:700]}"
 
                 # 3. ADVERSARIAL CHALLENGE
-                adversary = agents.AdversarialAgent(grok_client)
+                adversary = agents.AdversarialAgent(grok_client, model=LLM_SETTINGS["grok_model"])
                 adversary_response = await adversary.challenge_trade(ticker, signal, thesis, price)
                 bear_case = adversary_response.get("bear_case", "No major counter-risks identified.")
                 
-                print(f"ADVERSARY for {ticker}: Risk={adversary_response.get('counter_risk_level')}")
+                risk_level = adversary_response.get('counter_risk_level')
+                print(f"ADVERSARY for {ticker}: Risk={risk_level}")
 
+                # Hard Veto only on TERMINAL, or HIGH if flag is explicitly set
                 if adversary_response.get("invalid_thesis_flag"):
-                    print(f"Trade for {ticker} VETOED by Adversary.")
-                    continue
+                    if risk_level == "TERMINAL":
+                        print(f"Trade for {ticker} VETOED by Adversary (TERMINAL Risk).")
+                        continue
+                    elif risk_level == "HIGH":
+                        print(f"Trade for {ticker} VETOED by Adversary (HIGH Risk).")
+                        continue
+                    else:
+                        print(f"Adversary flag ignored for {ticker} (Risk is {risk_level}). Proceeding...")
 
                 # 4. RISK MANAGER PHASE
                 target_value = equity * 0.05 
@@ -980,7 +1216,7 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
                 risk_sys_prompt = agent_prompts.RISK_MANAGER_SYSTEM_PROMPT.format(max_pos_size_pct=10, max_total_exposure=1.5)
                 risk_sys_prompt += f"\n\nCONSIDER BEAR CASE: {bear_case}"
 
-                risk_agent = agents.RiskManager(grok_client)
+                risk_agent = agents.RiskManager(grok_client, model=LLM_SETTINGS["grok_model"])
                 risk_response = await call_grok(risk_sys_prompt, risk_prompt) # Using call_grok directly due to custom sys_prompt injection
 
                 

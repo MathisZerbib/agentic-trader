@@ -1,4 +1,9 @@
 import os
+import time
+from typing import Any
+from urllib.parse import urlparse
+
+import requests
 from dotenv import load_dotenv
 from alpaca.data.historical.news import NewsClient
 from alpaca.data.historical.screener import ScreenerClient
@@ -9,6 +14,12 @@ load_dotenv()
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+
+_TAVILY_SEARCH_URL = "https://api.tavily.com/search"
+_TAVILY_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_TAVILY_TTL_SECONDS = int(os.getenv("WEB_RESEARCH_TTL_SEC", "900"))
+_TAVILY_TIMEOUT_SECONDS = float(os.getenv("WEB_RESEARCH_TIMEOUT_SEC", "4"))
 
 news_client = None
 screener_client = None
@@ -106,3 +117,114 @@ def format_sentiment_for_prompt(symbol: str, sentiment: list) -> str:
     for item in sentiment:
         formatted += f"- {item['title']}: {item['body']}\n"
     return formatted
+
+
+def _cache_get(cache_key: str) -> list[dict[str, Any]] | None:
+    cached = _TAVILY_CACHE.get(cache_key)
+    if not cached:
+        return None
+
+    expires_at, payload = cached
+    if time.time() >= expires_at:
+        _TAVILY_CACHE.pop(cache_key, None)
+        return None
+
+    return payload
+
+
+def _cache_set(cache_key: str, payload: list[dict[str, Any]]) -> None:
+    _TAVILY_CACHE[cache_key] = (time.time() + _TAVILY_TTL_SECONDS, payload)
+
+
+def _tavily_search(*, query: str, max_results: int, days: int) -> list[dict[str, Any]]:
+    if not TAVILY_API_KEY:
+        return []
+
+    cache_key = f"{query}|{max_results}|{days}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    payload = {
+        "api_key": TAVILY_API_KEY,
+        "query": query,
+        "topic": "news",
+        "search_depth": "advanced",
+        "max_results": max_results,
+        "include_raw_content": False,
+        "include_images": False,
+        "days": days,
+    }
+
+    try:
+        response = requests.post(_TAVILY_SEARCH_URL, json=payload, timeout=_TAVILY_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        body = response.json()
+    except Exception as e:
+        print(f"Tavily search failed for query '{query}': {e}")
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for item in body.get("results", []):
+        url = item.get("url", "")
+        domain = urlparse(url).netloc.replace("www.", "") if url else "unknown"
+        normalized.append(
+            {
+                "title": item.get("title", "Untitled"),
+                "content": item.get("content", ""),
+                "url": url,
+                "published_date": item.get("published_date", ""),
+                "score": round(float(item.get("score", 0.0)), 3),
+                "domain": domain,
+            }
+        )
+
+    _cache_set(cache_key, normalized)
+    return normalized
+
+
+def get_macro_web_research(max_results: int = 6, days: int = 2) -> list[dict[str, Any]]:
+    query = (
+        "US stock market macro catalysts today: fed policy, treasury yields, inflation, "
+        "earnings surprises, risk-on risk-off sentiment"
+    )
+    return _tavily_search(query=query, max_results=max_results, days=days)
+
+
+def get_ticker_web_research(symbol: str, max_results: int = 5, days: int = 3) -> list[dict[str, Any]]:
+    query = (
+        f"{symbol} stock latest catalyst: earnings guidance, analyst upgrades downgrades, "
+        "SEC filings, product launches, litigation, outlook"
+    )
+    return _tavily_search(query=query, max_results=max_results, days=days)
+
+
+def format_tavily_for_prompt(scope: str, results: list[dict[str, Any]], max_items: int = 6) -> str:
+    if not results:
+        return ""
+
+    lines = [f"Web Research ({scope}):"]
+    for item in results[:max_items]:
+        content = (item.get("content") or "").strip().replace("\n", " ")
+        if len(content) > 220:
+            content = content[:220] + "..."
+        lines.append(
+            "- "
+            f"[{item.get('domain', 'source')}] score={item.get('score', 0)} "
+            f"date={item.get('published_date', 'n/a')} | {item.get('title', 'Untitled')} | {content}"
+        )
+    return "\n".join(lines)
+
+
+def shortlist_candidates_for_web_research(candidates: list[str], max_count: int = 3) -> list[str]:
+    deduped: list[str] = []
+    seen = set()
+    for symbol in candidates:
+        key = symbol.strip().upper()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+        if len(deduped) >= max_count:
+            break
+    return deduped
