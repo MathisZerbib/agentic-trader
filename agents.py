@@ -278,3 +278,19 @@ class TradeReviewer(BaseAgent):
             market_risks=market_risks,
         )
         return await self._call_llm(TRADE_REVIEWER_SYSTEM_PROMPT, prompt)
+
+from agent_prompts import POSITION_MONITOR_SYSTEM_PROMPT, POSITION_MONITOR_TASK_TEMPLATE
+
+class PositionMonitor(BaseAgent):
+    async def monitor_position(self, pos_data, market_context):
+        prompt = POSITION_MONITOR_TASK_TEMPLATE.format(
+            symbol=pos_data["symbol"],
+            qty=pos_data["qty"],
+            current_price=pos_data["current_price"],
+            avg_entry=pos_data["avg_entry"],
+            unrealized_plpc=pos_data["unrealized_plpc"],
+            tp_threshold=pos_data["tp_threshold"],
+            sl_threshold=pos_data["sl_threshold"],
+            market_context=market_context
+        )
+        return await self._call_llm(POSITION_MONITOR_SYSTEM_PROMPT, prompt)

@@ -241,7 +241,7 @@ data_client = None
 grok_client = None
 
 LLM_SETTINGS = {
-    "provider": "grok" if (XAI_API_KEY or OPENROUTER_API_KEY) else "local",
+    "provider": os.getenv("LLM_PROVIDER", "local"),
     "grok_model": DEFAULT_GROK_MODEL,
     "local_model": LOCAL_LLM_MODEL,
     "local_url": LOCAL_LLM_URL,
@@ -958,42 +958,54 @@ async def manage_existing_positions(db: Session):
             tp_threshold = TAKE_PROFIT_PERCENTAGE
             sl_threshold = STOP_LOSS_PERCENTAGE
             
-            action = None
-            if unrealized_plpc >= tp_threshold:
-                action = "TAKE PROFIT"
-            elif unrealized_plpc <= sl_threshold:
-                action = "STOP LOSS"
+            if unrealized_plpc >= tp_threshold or unrealized_plpc <= sl_threshold:
+                print(f"[AUDIT] {symbol} hit threshold ({round(unrealized_plpc*100, 2)}%). Calling PositionMonitor...")
                 
-            if action:
-                print(f"[{action}] Triggered for {symbol} at {round(unrealized_plpc*100, 2)}% P/L")
+                pos_data = {
+                    "symbol": symbol,
+                    "qty": pos.qty,
+                    "current_price": pos.current_price,
+                    "avg_entry": pos.avg_entry_price,
+                    "unrealized_plpc": round(unrealized_plpc*100, 2),
+                    "tp_threshold": tp_threshold*100,
+                    "sl_threshold": sl_threshold*100
+                }
+                market_context = "High frequency audit. Decide FULL_CLOSE or PARTIAL_CLOSE based on profit."
                 
- 
-                sell_req = MarketOrderRequest(
-                    symbol=symbol,
-                    qty=pos.qty,
-                    side=OrderSide.SELL,
-                    time_in_force=TimeInForce.DAY
-                )
-                
+                monitor = agents.PositionMonitor()
                 try:
-                    trading_client.submit_order(sell_req)
+                    decision = await monitor.monitor_position(pos_data, market_context)
+                    action = decision.get("action", "HOLD")
+                    close_fraction = float(decision.get("close_fraction", 1.0))
+                    reasoning = decision.get("reasoning", "No reasoning provided.")
                     
-                    # Log to DB
-                    log = models.AgentLog(
-                        title=f"{action}: {symbol}",
-                        content=f"Closed position for {symbol} at {round(unrealized_plpc*100, 2)}% P/L."
-                    )
-                    db.add(log)
-                    db.commit()
-                    
-                    # Broadcast to WS
-                    await broadcast_ws_message({
-                        "type": "logs",
-                        "data": [{"timestamp": str(datetime.datetime.now()), "title": log.title, "content": log.content}]
-                    })
-                    
+                    if action in ["FULL_CLOSE", "PARTIAL_CLOSE"]:
+                        sell_qty = int(float(pos.qty) * (close_fraction if action == "PARTIAL_CLOSE" else 1.0))
+                        if sell_qty < 1:
+                            sell_qty = 1 
+                            
+                        sell_req = MarketOrderRequest(
+                            symbol=symbol,
+                            qty=str(sell_qty),
+                            side=OrderSide.SELL,
+                            time_in_force=TimeInForce.DAY
+                        )
+                        
+                        trading_client.submit_order(sell_req)
+                        
+                        log = models.AgentLog(
+                            title=f"{action}: {symbol}",
+                            content=f"Closed {sell_qty} shares of {symbol} at {round(unrealized_plpc*100, 2)}% P/L.\nReason: {reasoning}"
+                        )
+                        db.add(log)
+                        db.commit()
+                        
+                        await broadcast_ws_message({
+                            "type": "logs",
+                            "data": [{"timestamp": str(datetime.datetime.now()), "title": log.title, "content": log.content}]
+                        })
                 except Exception as e:
-                    print(f"Failed to execute {action} for {symbol}: {e}")
+                    print(f"Failed to execute PositionMonitor for {symbol}: {e}")
                     
     except Exception as e:
         print(f"Error in position management: {e}")
@@ -1098,6 +1110,12 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
                 primary_strategy = "Mean Reversion"
 
         # 2. ANALYST & ADVERSARIAL PHASE
+        current_positions = trading_client.get_all_positions()
+        
+        if len(current_positions) >= 5:
+            print(f"Max concurrent trades (5) reached. Skipping new trade search.")
+            return
+            
         candidates = get_active_stocks(limit=10)
         if not candidates:
             candidates = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'AMD', 'META']
@@ -1340,4 +1358,5 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
             db.close()
 
 # Schedule the autonomous cycle
-scheduler.add_job(autonomous_cycle, 'interval', minutes=30)
+# scheduler.add_job(autonomous_cycle, 'interval', minutes=30)
+scheduler.add_job(autonomous_cycle, 'cron', day_of_week='mon-fri', hour=9, minute=30, timezone='America/New_York')
