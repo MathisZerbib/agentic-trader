@@ -14,12 +14,12 @@ load_dotenv()
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+LM_STUDIO_API_KEY = os.getenv("LM_STUDIO_API_KEY")
 
-_TAVILY_SEARCH_URL = "https://api.tavily.com/search"
-_TAVILY_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-_TAVILY_TTL_SECONDS = int(os.getenv("WEB_RESEARCH_TTL_SEC", "900"))
-_TAVILY_TIMEOUT_SECONDS = float(os.getenv("WEB_RESEARCH_TIMEOUT_SEC", "4"))
+_LMSTUDIO_PLAYWRIGHT_SEARCH_URL = os.getenv("LOCAL_LLM_URL", "http://host.docker.internal:1234")
+_WEB_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_WEB_TTL_SECONDS = int(os.getenv("WEB_RESEARCH_TTL_SEC", "900"))
+_WEB_TIMEOUT_SECONDS = float(os.getenv("WEB_RESEARCH_TIMEOUT_SEC", "120")) # Give LM Studio time to browse
 
 news_client = None
 screener_client = None
@@ -120,67 +120,101 @@ def format_sentiment_for_prompt(symbol: str, sentiment: list) -> str:
 
 
 def _cache_get(cache_key: str) -> list[dict[str, Any]] | None:
-    cached = _TAVILY_CACHE.get(cache_key)
+    cached = _WEB_CACHE.get(cache_key)
     if not cached:
         return None
 
     expires_at, payload = cached
     if time.time() >= expires_at:
-        _TAVILY_CACHE.pop(cache_key, None)
+        _WEB_CACHE.pop(cache_key, None)
         return None
 
     return payload
 
 
 def _cache_set(cache_key: str, payload: list[dict[str, Any]]) -> None:
-    _TAVILY_CACHE[cache_key] = (time.time() + _TAVILY_TTL_SECONDS, payload)
+    _WEB_CACHE[cache_key] = (time.time() + _WEB_TTL_SECONDS, payload)
 
 
-def _tavily_search(*, query: str, max_results: int, days: int) -> list[dict[str, Any]]:
-    if not TAVILY_API_KEY:
-        return []
-
+def _lmstudio_playwright_search(*, query: str, max_results: int, days: int) -> list[dict[str, Any]]:
     cache_key = f"{query}|{max_results}|{days}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
+    local_url = os.getenv("LOCAL_LLM_URL", "http://host.docker.internal:1234/v1/chat/completions")
+    # Clean url to root domain since native API uses /api/v1/chat
+    base_url = local_url.replace("/v1/chat/completions", "").replace("/v1", "")
+    if base_url.endswith("/"): base_url = base_url[:-1]
+    
+    native_url = f"{base_url}/api/v1/chat"
+
+    prompt = (
+        f"You have access to a Playwright MCP tool for web browsing.\n"
+        f"Please use your browser tool to search the web for the following query:\n"
+        f"'{query}'\n\n"
+        f"Analyze the search results for the last {days} days, and return exactly {max_results} relevant news articles or updates. "
+        "You MUST return ONLY a valid JSON array containing objects with these exact keys: "
+        "'title', 'url', 'content' (a brief summary), 'published_date', and 'domain'. Do not wrap the JSON output in markdown code blocks."
+    )
+
     payload = {
-        "api_key": TAVILY_API_KEY,
-        "query": query,
-        "topic": "news",
-        "search_depth": "advanced",
-        "max_results": max_results,
-        "include_raw_content": False,
-        "include_images": False,
-        "days": days,
+        "model": os.getenv("LOCAL_LLM_MODEL", "local-model"),
+        "input": f"System: You are a web research assistant. Output strictly a JSON array.\n\nUser: {prompt}",
+        "integrations": ["mcp/playwright"],
+        "temperature": 0.2,
+        "context_length": 8000
     }
 
     try:
-        response = requests.post(_TAVILY_SEARCH_URL, json=payload, timeout=_TAVILY_TIMEOUT_SECONDS)
+        headers = {"Content-Type": "application/json"}
+        if os.getenv("LM_STUDIO_API_KEY"):
+            headers["Authorization"] = f"Bearer {os.getenv('LM_STUDIO_API_KEY')}"
+            
+        print(f"Calling LM Studio native MCP API: {native_url} with integrations: mcp/playwright")
+        response = requests.post(native_url, json=payload, headers=headers, timeout=_WEB_TIMEOUT_SECONDS)
         response.raise_for_status()
-        body = response.json()
-    except Exception as e:
-        print(f"Tavily search failed for query '{query}': {e}")
-        return []
-
-    normalized: list[dict[str, Any]] = []
-    for item in body.get("results", []):
-        url = item.get("url", "")
-        domain = urlparse(url).netloc.replace("www.", "") if url else "unknown"
-        normalized.append(
-            {
+        
+        # Native LM Studio API returns 'output' as array of objects
+        resp_data = response.json()
+        raw_content = ""
+        if "output" in resp_data:
+            for out in resp_data["output"]:
+                if out.get("type") == "message":
+                    raw_content += out.get("content", "")
+        else:
+            raw_content = str(resp_data)
+        
+        import json
+        import re
+        
+        match = re.search(r'\[\s*\{.*?\}\s*\]', raw_content, re.DOTALL)
+        if match:
+            results = json.loads(match.group(0))
+        else:
+            results = json.loads(raw_content)
+            
+        normalized: list[dict[str, Any]] = []
+        for item in results:
+            url_str = item.get("url", "")
+            domain = item.get("domain", "")
+            if url_str and not domain:
+                domain = urlparse(url_str).netloc.replace("www.", "")
+            normalized.append({
                 "title": item.get("title", "Untitled"),
                 "content": item.get("content", ""),
-                "url": url,
+                "url": url_str,
                 "published_date": item.get("published_date", ""),
-                "score": round(float(item.get("score", 0.0)), 3),
-                "domain": domain,
-            }
-        )
+                "score": 0.9,
+                "domain": domain or "unknown",
+            })
 
-    _cache_set(cache_key, normalized)
-    return normalized
+        _cache_set(cache_key, normalized)
+        return normalized
+
+    except Exception as e:
+        print(f"LM Studio Playwright MCP search failed for query '{query}': {e}")
+        return []
 
 
 def get_macro_web_research(max_results: int = 6, days: int = 2) -> list[dict[str, Any]]:
@@ -188,7 +222,7 @@ def get_macro_web_research(max_results: int = 6, days: int = 2) -> list[dict[str
         "US stock market macro catalysts today: fed policy, treasury yields, inflation, "
         "earnings surprises, risk-on risk-off sentiment"
     )
-    return _tavily_search(query=query, max_results=max_results, days=days)
+    return _lmstudio_playwright_search(query=query, max_results=max_results, days=days)
 
 
 def get_ticker_web_research(symbol: str, max_results: int = 5, days: int = 3) -> list[dict[str, Any]]:
@@ -196,10 +230,10 @@ def get_ticker_web_research(symbol: str, max_results: int = 5, days: int = 3) ->
         f"{symbol} stock latest catalyst: earnings guidance, analyst upgrades downgrades, "
         "SEC filings, product launches, litigation, outlook"
     )
-    return _tavily_search(query=query, max_results=max_results, days=days)
+    return _lmstudio_playwright_search(query=query, max_results=max_results, days=days)
 
 
-def format_tavily_for_prompt(scope: str, results: list[dict[str, Any]], max_items: int = 6) -> str:
+def format_web_research_for_prompt(scope: str, results: list[dict[str, Any]], max_items: int = 6) -> str:
     if not results:
         return ""
 

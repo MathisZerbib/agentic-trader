@@ -141,7 +141,7 @@ async def call_local_llm(system_prompt, user_prompt):
     print("All fallback attempts failed.")
     return {}
 
-from agent_prompts import (
+from agents.prompts import (
     STRATEGIST_SYSTEM_PROMPT, STRATEGIST_TASK_TEMPLATE,
     ANALYST_SYSTEM_PROMPT, ANALYST_TASK_TEMPLATE,
     RISK_MANAGER_SYSTEM_PROMPT, RISK_MANAGER_TASK_TEMPLATE,
@@ -279,7 +279,7 @@ class TradeReviewer(BaseAgent):
         )
         return await self._call_llm(TRADE_REVIEWER_SYSTEM_PROMPT, prompt)
 
-from agent_prompts import POSITION_MONITOR_SYSTEM_PROMPT, POSITION_MONITOR_TASK_TEMPLATE
+from agents.prompts import POSITION_MONITOR_SYSTEM_PROMPT, POSITION_MONITOR_TASK_TEMPLATE
 
 class PositionMonitor(BaseAgent):
     async def monitor_position(self, pos_data, market_context):
