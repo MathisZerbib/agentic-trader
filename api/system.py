@@ -3,6 +3,7 @@ from core.clients import bot_state, grok_client
 from core.config import settings
 from core.llm_settings import LLM_SETTINGS
 import agents.agents as agents
+from agents.orchestrator import autonomous_cycle
 from services.state import trigger_state_broadcast
 import json
 import os
@@ -18,6 +19,15 @@ import logging
 import httpx
 
 logger = logging.getLogger(__name__)
+
+def _sync_local_llm_settings():
+    from core.llm_settings import LLM_SETTINGS, SETTINGS_FILE
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(LLM_SETTINGS, f, indent=4)
+    except Exception as e:
+        logger.error(f"Failed to sync LLM settings to disk: {e}")
 
 def _normalized_local_url(url: str) -> str:
     if not url: return ""
@@ -64,6 +74,13 @@ async def stop_bot():
     return {"status": "Bot stopped", "bot_active": bot_state['BOT_ACTIVE']}
 
 
+@router.post("/run-agent")
+async def run_agent(db: Session = Depends(get_db)):
+    # Run a single cycle forcefully
+    await autonomous_cycle(db, force=True)
+    return {"status": "Manual agent cycle triggered"}
+
+
 @router.get("/settings/llm")
 def get_llm_settings():
     return {
@@ -91,7 +108,7 @@ def get_llm_models(local_url: Optional[str] = None):
 
 
 @router.post("/settings/llm")
-def update_llm_settings(payload: LLMSettingsUpdateRequest):
+async def update_llm_settings(payload: LLMSettingsUpdateRequest):
     provider = payload.provider.lower().strip()
     if provider not in {"grok", "local"}:
         raise HTTPException(status_code=400, detail="provider must be 'grok' or 'local'")
@@ -111,6 +128,7 @@ def update_llm_settings(payload: LLMSettingsUpdateRequest):
     LLM_SETTINGS["provider"] = provider
     agents.USE_LOCAL_FALLBACK = provider == "local"
     _sync_local_llm_settings()
+    await trigger_state_broadcast()
 
     return {
         "status": "LLM settings updated",
