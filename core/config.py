@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Settings:
+    LLM_PROVIDER = os.getenv("LLM_PROVIDER", "grok")
     LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "local-model")
     LOCAL_LLM_URL = os.getenv("LOCAL_LLM_URL", "http://host.docker.internal:1234/v1")
     WEB_RESEARCH_ENABLED = os.getenv("WEB_RESEARCH_ENABLED", "true").lower() == "true"
@@ -23,5 +24,6 @@ class Settings:
     
     TAKE_PROFIT_PERCENTAGE = 0.05
     STOP_LOSS_PERCENTAGE = -0.03
+    DAILY_DRAWDOWN_THRESHOLD = float(os.getenv("DAILY_DRAWDOWN_THRESHOLD", "-0.03"))
 
 settings = Settings()

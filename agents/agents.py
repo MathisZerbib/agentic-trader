@@ -13,7 +13,7 @@ DEFAULT_GROK_MODEL = os.getenv("GROK_MODEL", "x-ai/grok-4.1-fast")
 LM_STUDIO_API_TOKEN = os.getenv("LM_API_TOKEN") or os.getenv("LM_STUDIO_API_KEY")
 
 # Circuit breaker flag for OpenRouter 402 errors
-USE_LOCAL_FALLBACK = False
+USE_LOCAL_FALLBACK = os.getenv("LLM_PROVIDER", "").lower() == "local"
 
 async def call_local_llm(system_prompt, user_prompt):
     # Prioritize configured URL and support both LM Studio API and OpenAI-compatible paths.
@@ -30,14 +30,12 @@ async def call_local_llm(system_prompt, user_prompt):
         clean_url = raw_url.rstrip("/")
         if clean_url.endswith("/chat/completions"):
             chat_urls.append(clean_url)
-            chat_urls.append(clean_url.replace("/v1/chat/completions", "/api/v1/chat/completions"))
         elif clean_url.endswith("/v1"):
-            root_url = clean_url[:-3]
-            chat_urls.append(f"{root_url}/api/v1/chat/completions")
             chat_urls.append(f"{clean_url}/chat/completions")
         else:
-            chat_urls.append(f"{clean_url}/api/v1/chat/completions")
+            # Most local servers (LM Studio, Ollama, etc) use /v1 or /v1/chat/completions
             chat_urls.append(f"{clean_url}/v1/chat/completions")
+            chat_urls.append(clean_url) # Raw fallback
 
     # Remove duplicates while preserving order.
     chat_urls = list(dict.fromkeys(chat_urls))
@@ -67,6 +65,9 @@ async def call_local_llm(system_prompt, user_prompt):
         try:
             print(f"Calling Local LLM at {endpoint}...")
 
+            # Force autodetect to ensure we match what is actually loaded in LM Studio
+            model_to_use = await get_active_local_model()
+
             # First try with json_object, but be ready to fallback to text.
             try:
                 # Truncate inputs if they're too large for local models.
@@ -77,7 +78,7 @@ async def call_local_llm(system_prompt, user_prompt):
                 content = await _post_chat_completion(
                     endpoint,
                     {
-                        "model": LOCAL_LLM_MODEL,
+                        "model": model_to_use,
                         "messages": [
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt},
@@ -96,7 +97,7 @@ async def call_local_llm(system_prompt, user_prompt):
                     content = await _post_chat_completion(
                         endpoint,
                         {
-                            "model": LOCAL_LLM_MODEL,
+                            "model": model_to_use,
                             "messages": [
                                 {"role": "system", "content": system_prompt},
                                 {"role": "user", "content": user_prompt},
@@ -140,6 +141,37 @@ async def call_local_llm(system_prompt, user_prompt):
     
     print("All fallback attempts failed.")
     return {}
+
+async def get_active_local_model():
+    """
+    Fetches the currently loaded model(s) from LM Studio's /v1/models endpoint.
+    """
+    local_url = os.getenv("LOCAL_LLM_URL", "http://host.docker.internal:1234/v1")
+    # Clean up URL to get the base /v1 endpoint
+    if "/chat/completions" in local_url:
+        base_url = local_url.replace("/chat/completions", "")
+    else:
+        base_url = local_url.rstrip("/")
+
+    models_url = f"{base_url}/models"
+    
+    try:
+        def _fetch():
+            req = urllib.request.Request(models_url, method="GET")
+            if LM_STUDIO_API_TOKEN:
+                req.add_header("Authorization", f"Bearer {LM_STUDIO_API_TOKEN}")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data.get("data", [])
+        
+        models_data = await asyncio.to_thread(_fetch)
+        if models_data:
+            # Return the first available model ID
+            return models_data[0].get("id")
+    except Exception as e:
+        print(f"Failed to autodetect local model: {e}")
+    
+    return os.getenv("LOCAL_LLM_MODEL", "local-model")
 
 from agents.prompts import (
     STRATEGIST_SYSTEM_PROMPT, STRATEGIST_TASK_TEMPLATE,

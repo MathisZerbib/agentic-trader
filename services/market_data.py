@@ -213,7 +213,12 @@ def _lmstudio_playwright_search(*, query: str, max_results: int, days: int) -> l
         return normalized
 
     except Exception as e:
-        print(f"LM Studio Playwright MCP search failed for query '{query}': {e}")
+        error_msg = str(e)
+        if "403" in error_msg or "Permission denied" in error_msg:
+            print(f"WEB RESEARCH BLOCKED: LM Studio Plugins/MCP are disabled or denied (403).")
+            print("To fix: Enable 'Allow Plugins via API' in LM Studio Server settings.")
+        else:
+            print(f"LM Studio Playwright MCP search failed for query '{query}': {e}")
         return []
 
 
@@ -262,3 +267,38 @@ def shortlist_candidates_for_web_research(candidates: list[str], max_count: int 
         if len(deduped) >= max_count:
             break
     return deduped
+def get_market_data(symbols: list[str]) -> str:
+    """
+    Fetches the latest bars/snapshots for a list of symbols and returns a summary string.
+    """
+    from alpaca.data.requests import StockSnapshotRequest
+    from core.clients import data_client
+    
+    if not data_client:
+        return "Market data client not initialized."
+    
+    summary = ""
+    try:
+        request_params = StockSnapshotRequest(symbol_or_symbols=symbols)
+        snapshots = data_client.get_stock_snapshot(request_params)
+        
+        for s in symbols:
+            if s in snapshots:
+                snap = snapshots[s]
+                price = snap.latest_trade.price
+                prev_close = snap.previous_daily_bar.close
+                change = ((price - prev_close) / prev_close) * 100 if prev_close else 0
+                
+                bid = snap.latest_quote.bid_price
+                ask = snap.latest_quote.ask_price
+                spread = ask - bid if ask and bid else 0
+                
+                vol = snap.daily_bar.volume
+                
+                summary += f"{s}: Price={price}, Chg={round(change, 2)}%, Spread={round(spread, 3)}, Vol={vol} | "
+            else:
+                summary += f"{s}: no data | "
+    except Exception as e:
+        summary = f"Error fetching market data: {e}"
+        
+    return summary

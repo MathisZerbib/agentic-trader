@@ -1,7 +1,8 @@
-from core.config import settings
-import json
 import asyncio
-import datetime
+import traceback
+import json
+from datetime import datetime
+from core.config import settings
 from sqlalchemy.orm import Session
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
@@ -10,6 +11,15 @@ from api.ws import broadcast_ws_message
 from database import SessionLocal
 import models
 import agents.agents as agents
+import agents.prompts as agent_prompts
+from services.market_data import (
+    get_active_stocks, get_latest_news, get_market_data,
+    get_social_sentiment, format_news_for_prompt,
+    format_sentiment_for_prompt, get_ticker_web_research,
+    get_macro_web_research, format_web_research_for_prompt,
+    shortlist_candidates_for_web_research
+)
+from alpaca.data.requests import StockSnapshotRequest
 
 async def call_grok(system_prompt, user_prompt):
     if agents.USE_LOCAL_FALLBACK or not grok_client:
@@ -31,7 +41,7 @@ async def call_grok(system_prompt, user_prompt):
     except Exception as e:
         error_msg = str(e).lower()
         if "402" in error_msg or "insufficient credits" in error_msg:
-            print(f"Grok call failed (402): {e}. PERMANENTLY Switching to fallback model ({LOCAL_LLM_MODEL}).")
+            print(f"Grok call failed (402): {e}. PERMANENTLY Switching to fallback model ({agents.LOCAL_LLM_MODEL}).")
             agents.USE_LOCAL_FALLBACK = True
             return await agents.call_local_llm(system_prompt, user_prompt)
         else:
@@ -97,10 +107,13 @@ async def manage_existing_positions(db: Session):
                         db.add(log)
                         db.commit()
                         
-                        await broadcast_ws_message({
-                            "type": "logs",
-                            "data": [{"timestamp": str(datetime.datetime.now()), "title": log.title, "content": log.content}]
-                        })
+                        try:
+                            await broadcast_ws_message({
+                                "type": "logs",
+                                "data": [{"timestamp": str(datetime.now()), "title": log.title, "content": log.content}]
+                            })
+                        except:
+                            pass
                 except Exception as e:
                     print(f"Failed to execute PositionMonitor for {symbol}: {e}")
                     
@@ -108,7 +121,8 @@ async def manage_existing_positions(db: Session):
         print(f"Error in position management: {e}")
 
 async def autonomous_cycle(db: Session = None, force: bool = False):
-    if not BOT_ACTIVE and not force:
+    print("DEBUG: starting autonomous cycle V2")
+    if not bot_state.get('BOT_ACTIVE', False) and not force:
         print("Bot is paused. Skipping cycle.")
         return
 
@@ -132,19 +146,24 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
         daily_drawdown = (equity - last_equity) / last_equity if last_equity > 0 else 0
         
         # 0. GLOBAL CIRCUIT BREAKER (Kill Switch)
-        if daily_drawdown < -0.03: # 3% Daily Drawdown Limit
-            print(f"!!! CIRCUIT BREAKER TRIGGERED: Daily Drawdown is {round(daily_drawdown*100, 2)}% !!!")
-            # Log the event
-            log = models.AgentLog(
-                title="CIRCUIT BREAKER: KILL SWITCH",
-                content=f"Daily drawdown reached {round(daily_drawdown*100, 2)}%. Closing all positions to protect capital."
-            )
-            db.add(log)
-            db.commit()
-            
-            # Close all positions
-            trading_client.close_all_positions(cancel_orders=True)
-            return
+        if daily_drawdown < settings.DAILY_DRAWDOWN_THRESHOLD:
+            # BYPASS: Allow if human-triggered AND no open positions (manual recovery)
+            open_positions = trading_client.get_all_positions()
+            if force and len(open_positions) == 0:
+                print(f"CIRCUIT BREAKER: Manual bypass active (Drawdown: {round(daily_drawdown*100, 2)}%)")
+            else:
+                print(f"!!! CIRCUIT BREAKER TRIGGERED: Daily Drawdown is {round(daily_drawdown*100, 2)}% !!!")
+                # Log the event
+                log = models.AgentLog(
+                    title="CIRCUIT BREAKER: KILL SWITCH",
+                    content=f"Daily drawdown reached {round(daily_drawdown*100, 2)}%. Closing all positions to protect capital."
+                )
+                db.add(log)
+                db.commit()
+                
+                # Close all positions
+                trading_client.close_all_positions(cancel_orders=True)
+                return
 
         # --- POSITION AUDIT PHASE (Take Profit / Stop Loss) ---
         await manage_existing_positions(db)
@@ -166,10 +185,10 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
                 news_summary += f"{s}: {n['title']} | "
 
         macro_web_summary = ""
-        if WEB_RESEARCH_ENABLED:
+        if settings.WEB_RESEARCH_ENABLED:
             macro_web = get_macro_web_research(
-                max_results=WEB_RESEARCH_MACRO_MAX_RESULTS,
-                days=min(WEB_RESEARCH_DAYS, 3),
+                max_results=settings.WEB_RESEARCH_MACRO_MAX_RESULTS,
+                days=min(settings.WEB_RESEARCH_DAYS, 3),
             )
             macro_web_summary = format_web_research_for_prompt("Macro", macro_web, max_items=5)
 
@@ -221,9 +240,9 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
             candidates = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'AMD', 'META']
 
         web_research_symbols = set()
-        if WEB_RESEARCH_ENABLED:
+        if settings.WEB_RESEARCH_ENABLED:
             web_research_symbols = set(
-                shortlist_candidates_for_web_research(candidates, max_count=WEB_RESEARCH_MAX_TICKERS)
+                shortlist_candidates_for_web_research(candidates, max_count=settings.WEB_RESEARCH_MAX_TICKERS)
             )
 
         for ticker in candidates:
@@ -244,8 +263,8 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
                 if ticker in web_research_symbols:
                     web_hits = get_ticker_web_research(
                         ticker,
-                        max_results=WEB_RESEARCH_TICKER_MAX_RESULTS,
-                        days=WEB_RESEARCH_DAYS,
+                        max_results=settings.WEB_RESEARCH_TICKER_MAX_RESULTS,
+                        days=settings.WEB_RESEARCH_DAYS,
                     )
                     web_research_prompt = format_web_research_for_prompt(ticker, web_hits, max_items=5)
 
@@ -417,7 +436,7 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
                         await broadcast_ws_message({
                             "type": "trades",
                             "data": [{
-                                "timestamp": str(datetime.datetime.now()),
+                                "timestamp": str(datetime.now()),
                                 "side": side,
                                 "symbol": ticker,
                                 "qty": final_qty,
@@ -441,10 +460,13 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
                     )
                     db.add(log)
                     db.commit()
-                    await broadcast_ws_message({
-                        "type": "logs",
-                        "data": [{"timestamp": str(datetime.datetime.now()), "title": log.title, "content": log.content}]
-                    })
+                    try:
+                        await broadcast_ws_message({
+                            "type": "logs",
+                            "data": [{"timestamp": str(datetime.now()), "title": log.title, "content": log.content}]
+                        })
+                    except:
+                        pass
 
             except Exception as e:
                 print(f"Error processing {ticker}: {e}")
@@ -459,6 +481,7 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
 
     except Exception as e:
         print(f"Autonomous cycle error: {e}")
+        traceback.print_exc()
     finally:
         if db:
             db.close()

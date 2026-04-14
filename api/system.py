@@ -77,8 +77,13 @@ async def stop_bot():
 @router.post("/run-agent")
 async def run_agent(db: Session = Depends(get_db)):
     # Run a single cycle forcefully
-    await autonomous_cycle(db, force=True)
-    return {"status": "Manual agent cycle triggered"}
+    try:
+        await autonomous_cycle(db, force=True)
+        return {"status": "Manual agent cycle triggered"}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
 
 
 @router.get("/settings/llm")
