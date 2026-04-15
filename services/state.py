@@ -46,12 +46,13 @@ def get_current_state(db: Session):
                         "market_value": float(p.market_value),
                         "unrealized_pl": float(p.unrealized_pl),
                         "current_price": float(p.current_price) if hasattr(p, 'current_price') else 0.0,
-                        "change_today": float(p.unrealized_intraday_plpc) * 100 if hasattr(p, 'unrealized_intraday_plpc') else 0.0
+                        "change_today": float(p.unrealized_intraday_plpc or 0.0) * 100 if hasattr(p, 'unrealized_intraday_plpc') else 0.0
                     } for p in positions
                 ]
             }
-        except:
-            pass
+        except Exception as e:
+            print(f"Error fetching portfolio state: {e}")
+            portfolio_data = None
 
     return {
         "type": "state",

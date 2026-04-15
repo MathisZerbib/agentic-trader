@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 from alpaca.data.historical.news import NewsClient
 from alpaca.data.historical.screener import ScreenerClient
 from alpaca.data.requests import NewsRequest, MostActivesRequest, StockBarsRequest
+from alpaca.data.timeframe import TimeFrame as BarTimeframe
+from alpaca.data.enums import MostActivesBy, DataFeed
 from datetime import datetime, timedelta
 from services.llm_utils import get_active_local_model_sync
 
@@ -328,9 +330,10 @@ def get_rsi(symbol: str, window: int = 14) -> float:
         
         request_params = StockBarsRequest(
             symbol_or_symbols=symbol,
-            timeframe=BarTimeframe.HOUR,
+            timeframe=BarTimeframe.Hour,
             start=start,
-            end=end
+            end=end,
+            feed=DataFeed.IEX
         )
         
         bars = data_client.get_stock_bars(request_params)

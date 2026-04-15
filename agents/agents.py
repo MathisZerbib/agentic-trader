@@ -67,40 +67,45 @@ async def call_local_llm(system_prompt, user_prompt):
 
             # Force autodetect to ensure we match what is actually loaded in LM Studio
             model_to_use = await get_active_local_model()
+            content = "" 
 
-            # First try with json_object, but be ready to fallback to text.
+            # First try with json_object, but be ready to fallback to text using standard truncation.
             try:
                 # Truncate inputs if they're too large for local models.
-                if len(system_prompt) + len(user_prompt) > 12000:  # Rough char count for ~3-4k tokens
-                    print("Truncating prompt for local model context limit...")
-                    user_prompt = user_prompt[:8000] + "...(truncated)"
+                # Smaller models like Gemma 2b/4b often have limited context or stability issues with large prompts.
+                max_chars = 4000 if any(small in model_to_use.lower() for small in ["2b", "3b", "4b", "tiny"]) else 7000
+                if len(system_prompt) + len(user_prompt) > max_chars:
+                    print(f"Truncating prompt for local model ({model_to_use}) context limit...")
+                    user_prompt = user_prompt[:max_chars - 2000] + "...(truncated)"
 
-                content = await _post_chat_completion(
-                    endpoint,
-                    {
-                        "model": model_to_use,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        "response_format": {"type": "json_object"},
-                        "max_tokens": 768,
-                    },
-                )
+                payload = {
+                    "model": model_to_use,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "max_tokens": 768,
+                }
+                
+                # Only include response_format if it doesn't look like a model that might choke on it,
+                # or if we haven't failed yet.
+                if "gemma" not in model_to_use.lower():
+                    payload["response_format"] = {"type": "json_object"}
+
+                content = await _post_chat_completion(endpoint, payload)
             except Exception as e_format:
-                if "response_format" in str(e_format) or "400" in str(e_format):
-                    print(f"Local LLM issue (format/context), retrying with text format...")
-                    # Aggressive truncation for fallback.
-                    if len(system_prompt) + len(user_prompt) > 8000:
-                        user_prompt = user_prompt[:5000] + "...(truncated)"
-
+                # If first attempt fails (likely context or format), retry with ultra-safe settings.
+                error_str = str(e_format).lower()
+                if any(x in error_str for x in ["400", "context", "response_format", "invalid"]):
+                    # Silent retry for common small-model issues
+                    safe_prompt = user_prompt[:3000] + "...(truncated)"
                     content = await _post_chat_completion(
                         endpoint,
                         {
                             "model": model_to_use,
                             "messages": [
                                 {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": user_prompt},
+                                {"role": "user", "content": safe_prompt},
                             ],
                             "max_tokens": 768,
                         },
