@@ -9,6 +9,7 @@ class LLMSettingsUpdateRequest(BaseModel):
     grok_model: Optional[str] = None
     local_model: Optional[str] = None
     local_url: Optional[str] = None
+    position_monitor_interval_seconds: Optional[int] = 60
 
 class LoadModelRequest(BaseModel):
     model: str

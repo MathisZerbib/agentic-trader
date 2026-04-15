@@ -160,7 +160,7 @@ from agents.prompts import (
 )
 
 class BaseAgent:
-    def __init__(self, client, model=DEFAULT_GROK_MODEL):
+    def __init__(self, client=None, model=DEFAULT_GROK_MODEL):
         self.client = client
         self.model = model
 

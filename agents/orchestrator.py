@@ -48,11 +48,17 @@ async def call_grok(system_prompt, user_prompt):
             print(f"Grok call failed: {e}")
             return {}
 
-async def manage_existing_positions(db: Session):
+async def manage_existing_positions(db: Session = None):
     """
     Audits all open positions and closes them if they hit Take Profit (5%) or Stop Loss (-3%).
     """
     if not trading_client: return
+
+    if not db:
+        db = SessionLocal()
+        should_close = True
+    else:
+        should_close = False
 
     try:
         positions = trading_client.get_all_positions()
@@ -79,11 +85,12 @@ async def manage_existing_positions(db: Session):
                 }
                 market_context = "High frequency audit. Decide FULL_CLOSE or PARTIAL_CLOSE based on profit."
                 
-                monitor = agents.PositionMonitor()
+                monitor = agents.PositionMonitor(grok_client, model=settings.DEFAULT_GROK_MODEL)
                 try:
                     decision = await monitor.monitor_position(pos_data, market_context)
+                    if not decision: decision = {}
                     action = decision.get("action", "HOLD")
-                    close_fraction = float(decision.get("close_fraction", 1.0))
+                    close_fraction = float(decision.get("close_fraction") or 1.0)
                     reasoning = decision.get("reasoning", "No reasoning provided.")
                     
                     if action in ["FULL_CLOSE", "PARTIAL_CLOSE"]:
@@ -119,6 +126,9 @@ async def manage_existing_positions(db: Session):
                     
     except Exception as e:
         print(f"Error in position management: {e}")
+    finally:
+        if should_close and db:
+            db.close()
 
 async def autonomous_cycle(db: Session = None, force: bool = False):
     print("DEBUG: starting autonomous cycle V2")

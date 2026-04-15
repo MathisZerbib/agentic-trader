@@ -54,7 +54,11 @@ def get_portfolio():
                 "symbol": p.symbol,
                 "qty": float(p.qty),
                 "market_value": float(p.market_value),
-                "unrealized_pl": float(p.unrealized_pl)
+                "unrealized_pl": float(p.unrealized_pl),
+                "unrealized_plpc": (float(p.unrealized_plpc) * 100) if p.unrealized_plpc is not None else 
+                                   ((float(p.unrealized_pl) / (float(p.avg_entry_price) * float(p.qty))) * 100 if float(p.avg_entry_price) > 0 else 0.0),
+                "current_price": float(p.current_price) if hasattr(p, 'current_price') else 0.0,
+                "change_today": float(p.unrealized_intraday_plpc or 0.0) * 100
             } for p in positions
         ]
     }

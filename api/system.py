@@ -97,6 +97,7 @@ def get_llm_settings():
         "fallback_active": agents.USE_LOCAL_FALLBACK,
         "active_engine": _active_engine_label(),
         "openrouter_available": bool(grok_client),
+        "position_monitor_interval_seconds": settings.POSITION_MONITOR_INTERVAL_SECONDS,
     }
 
 
@@ -132,6 +133,24 @@ async def update_llm_settings(payload: LLMSettingsUpdateRequest):
 
     LLM_SETTINGS["provider"] = provider
     agents.USE_LOCAL_FALLBACK = provider == "local"
+    
+    if payload.position_monitor_interval_seconds:
+        interval = max(30, payload.position_monitor_interval_seconds) # Min 30s
+        settings.POSITION_MONITOR_INTERVAL_SECONDS = interval
+        LLM_SETTINGS["position_monitor_interval_seconds"] = interval
+        
+        # Reschedule the job
+        from main import scheduler
+        try:
+            scheduler.reschedule_job(
+                'position_monitor', 
+                trigger='interval', 
+                seconds=interval
+            )
+            print(f"Rescheduled position_monitor to {interval}s")
+        except Exception as e:
+            print(f"Failed to reschedule job: {e}")
+
     _sync_local_llm_settings()
     await trigger_state_broadcast()
 

@@ -10,6 +10,7 @@ LLM_SETTINGS = {
     "grok_model": settings.DEFAULT_GROK_MODEL,
     "local_model": settings.LOCAL_LLM_MODEL,
     "local_url": settings.LOCAL_LLM_URL,
+    "position_monitor_interval_seconds": settings.POSITION_MONITOR_INTERVAL_SECONDS,
 }
 
 # Load from disk if exists

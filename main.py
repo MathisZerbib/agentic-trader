@@ -29,13 +29,20 @@ app.add_middleware(
 )
 
 # Optional: Add the background scheduled job here, linking to agents/orchestrator.py
-from agents.orchestrator import autonomous_cycle
+from agents.orchestrator import autonomous_cycle, manage_existing_positions
 from services.state import scheduled_broadcast
 
 scheduler = AsyncIOScheduler()
 scheduler.add_job(scheduled_broadcast, 'interval', seconds=10)
-# scheduler.add_job(autonomous_cycle, 'interval', minutes=30)
-scheduler.add_job(autonomous_cycle, 'cron', day_of_week='mon-fri', hour=9, minute=30, timezone='America/New_York')
+# Separate position audit agent, defaults to 60 seconds
+scheduler.add_job(
+    manage_existing_positions, 
+    'interval', 
+    seconds=settings.POSITION_MONITOR_INTERVAL_SECONDS, 
+    id='position_monitor'
+)
+# Main autonomous trading cycle (Full Agent Flow)
+scheduler.add_job(autonomous_cycle, 'cron', day_of_week='mon-fri', hour=9, minute=30, timezone='America/New_York', id='autonomous_cycle')
 
 @app.on_event("startup")
 def start_scheduler():
