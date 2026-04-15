@@ -149,8 +149,8 @@ def _lmstudio_playwright_search(*, query: str, max_results: int, days: int) -> l
     base_url = local_url.replace("/v1/chat/completions", "").replace("/v1", "")
     if base_url.endswith("/"): base_url = base_url[:-1]
     
-    native_url = f"{base_url}/api/v1/chat"
-
+    native_url = f"{base_url}/v1/responses"
+    
     prompt = (
         f"You have access to a Playwright MCP tool for web browsing.\n"
         f"Please use your browser tool to search the web for the following query:\n"
@@ -159,14 +159,19 @@ def _lmstudio_playwright_search(*, query: str, max_results: int, days: int) -> l
         "You MUST return ONLY a valid JSON array containing objects with these exact keys: "
         "'title', 'url', 'content' (a brief summary), 'published_date', and 'domain'. Do not wrap the JSON output in markdown code blocks."
     )
+    
+    messages = [
+        {"role": "system", "content": "You are a web research assistant. Output strictly a JSON array."},
+        {"role": "user", "content": prompt}
+    ]
 
     model_to_use = get_active_local_model_sync()
     payload = {
         "model": model_to_use,
-        "input": f"System: You are a web research assistant. Output strictly a JSON array.\n\nUser: {prompt}",
+        "messages": messages,
         "integrations": ["mcp/playwright"],
         "temperature": 0.2,
-        "context_length": 8000
+        "context_length": 26000 # Increased to match user preference
     }
 
     try:
@@ -174,14 +179,16 @@ def _lmstudio_playwright_search(*, query: str, max_results: int, days: int) -> l
         if os.getenv("LM_STUDIO_API_KEY"):
             headers["Authorization"] = f"Bearer {os.getenv('LM_STUDIO_API_KEY')}"
             
-        print(f"Calling LM Studio native MCP API: {native_url} with integrations: mcp/playwright")
+        print(f"Calling LM Studio native responses API: {native_url} with integrations: mcp/playwright")
         response = requests.post(native_url, json=payload, headers=headers, timeout=_WEB_TIMEOUT_SECONDS)
         response.raise_for_status()
         
-        # Native LM Studio API returns 'output' as array of objects
+        # /v1/responses returns choices like chat completions
         resp_data = response.json()
         raw_content = ""
-        if "output" in resp_data:
+        if "choices" in resp_data:
+            raw_content = resp_data["choices"][0]["message"]["content"]
+        elif "output" in resp_data:
             for out in resp_data["output"]:
                 if out.get("type") == "message":
                     raw_content += out.get("content", "")
