@@ -7,8 +7,10 @@ import requests
 from dotenv import load_dotenv
 from alpaca.data.historical.news import NewsClient
 from alpaca.data.historical.screener import ScreenerClient
-from alpaca.data.requests import NewsRequest, MostActivesRequest
-from alpaca.data.enums import MostActivesBy
+from alpaca.data.requests import NewsRequest, MostActivesRequest, StockBarsRequest
+from datetime import datetime, timedelta
+from services.llm_utils import get_active_local_model_sync
+
 
 load_dotenv()
 
@@ -158,8 +160,9 @@ def _lmstudio_playwright_search(*, query: str, max_results: int, days: int) -> l
         "'title', 'url', 'content' (a brief summary), 'published_date', and 'domain'. Do not wrap the JSON output in markdown code blocks."
     )
 
+    model_to_use = get_active_local_model_sync()
     payload = {
-        "model": os.getenv("LOCAL_LLM_MODEL", "local-model"),
+        "model": model_to_use,
         "input": f"System: You are a web research assistant. Output strictly a JSON array.\n\nUser: {prompt}",
         "integrations": ["mcp/playwright"],
         "temperature": 0.2,
@@ -302,3 +305,43 @@ def get_market_data(symbols: list[str]) -> str:
         summary = f"Error fetching market data: {e}"
         
     return summary
+
+def get_rsi(symbol: str, window: int = 14) -> float:
+    """
+    Calculates the 14-period RSI (Relative Strength Index) for a given symbol.
+    """
+    from core.clients import data_client
+    if not data_client:
+        return 50.0
+        
+    try:
+        # Get 30 bars to ensure we have enough data for a 14-period RSI
+        end = datetime.now()
+        start = end - timedelta(days=5)
+        
+        request_params = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=BarTimeframe.HOUR,
+            start=start,
+            end=end
+        )
+        
+        bars = data_client.get_stock_bars(request_params)
+        df = bars.df
+        
+        if df.empty or len(df) < window:
+            return 50.0
+            
+        # Standard RSI calculation
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+        
+        rs = gain / loss
+        rsi = 100 - (100 / (1+rs))
+        
+        last_rsi = rsi.iloc[-1]
+        return round(float(last_rsi), 2) if not (rsi.isna().iloc[-1]) else 50.0
+    except Exception as e:
+        print(f"Error calculating RSI for {symbol}: {e}")
+        return 50.0

@@ -17,7 +17,7 @@ from services.market_data import (
     get_social_sentiment, format_news_for_prompt,
     format_sentiment_for_prompt, get_ticker_web_research,
     get_macro_web_research, format_web_research_for_prompt,
-    shortlist_candidates_for_web_research
+    shortlist_candidates_for_web_research, get_rsi
 )
 from alpaca.data.requests import StockSnapshotRequest
 
@@ -139,7 +139,7 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
         return
 
     try:
-        account = trading_client.get_account()
+        account = await asyncio.to_thread(trading_client.get_account)
         equity = float(account.equity)
         buying_power = float(account.buying_power)
         last_equity = float(account.last_equity)
@@ -148,8 +148,8 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
         # 0. GLOBAL CIRCUIT BREAKER (Kill Switch)
         if daily_drawdown < settings.DAILY_DRAWDOWN_THRESHOLD:
             # BYPASS: Allow if human-triggered AND no open positions (manual recovery)
-            open_positions = trading_client.get_all_positions()
-            if force and len(open_positions) == 0:
+            open_positions = await asyncio.to_thread(trading_client.get_all_positions)
+            if force and len(open_positions) <= 3:
                 print(f"CIRCUIT BREAKER: Manual bypass active (Drawdown: {round(daily_drawdown*100, 2)}%)")
             else:
                 print(f"!!! CIRCUIT BREAKER TRIGGERED: Daily Drawdown is {round(daily_drawdown*100, 2)}% !!!")
@@ -177,16 +177,17 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
         except: pass
 
         # Get macro news summary
-        active_symbols = get_active_stocks(limit=5)
+        active_symbols = await asyncio.to_thread(get_active_stocks, limit=5)
         news_summary = ""
         for s in active_symbols:
-            news = get_latest_news(s, max_results=2)
+            news = await asyncio.to_thread(get_latest_news, s, max_results=2)
             for n in news:
                 news_summary += f"{s}: {n['title']} | "
 
         macro_web_summary = ""
         if settings.WEB_RESEARCH_ENABLED:
-            macro_web = get_macro_web_research(
+            macro_web = await asyncio.to_thread(
+                get_macro_web_research,
                 max_results=settings.WEB_RESEARCH_MACRO_MAX_RESULTS,
                 days=min(settings.WEB_RESEARCH_DAYS, 3),
             )
@@ -226,7 +227,7 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
                 primary_strategy = "Mean Reversion"
 
         # 2. ANALYST & ADVERSARIAL PHASE
-        current_positions = trading_client.get_all_positions()
+        current_positions = await asyncio.to_thread(trading_client.get_all_positions)
         
         open_positions_count = len(current_positions)
         if open_positions_count >= 5:
@@ -235,7 +236,7 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
             
         remaining_slots = 5 - open_positions_count
         
-        candidates = get_active_stocks(limit=10)
+        candidates = await asyncio.to_thread(get_active_stocks, limit=10)
         if not candidates:
             candidates = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'AMD', 'META']
 
@@ -252,16 +253,17 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
                 snap_req = StockSnapshotRequest(symbol_or_symbols=[ticker])
                 snap = data_client.get_stock_snapshot(snap_req)[ticker]
                 price = snap.latest_trade.price
-                rsi = 50.0
+                rsi = await asyncio.to_thread(get_rsi, ticker)
 
                 # --- News and Sentiment Integration ---
-                ticker_news = get_latest_news(ticker, max_results=3)
+                ticker_news = await asyncio.to_thread(get_latest_news, ticker, max_results=3)
                 news_prompt = format_news_for_prompt(ticker, ticker_news)
-                social_sentiment = get_social_sentiment(ticker, max_results=3)
+                social_sentiment = await asyncio.to_thread(get_social_sentiment, ticker, max_results=3)
                 sentiment_prompt = format_sentiment_for_prompt(ticker, social_sentiment)
                 web_research_prompt = ""
                 if ticker in web_research_symbols:
-                    web_hits = get_ticker_web_research(
+                    web_hits = await asyncio.to_thread(
+                        get_ticker_web_research,
                         ticker,
                         max_results=settings.WEB_RESEARCH_TICKER_MAX_RESULTS,
                         days=settings.WEB_RESEARCH_DAYS,
@@ -304,6 +306,15 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
                 analyst_response = await analyst_agent.analyze_ticker(ticker, price_data)
 
                 if not analyst_response or analyst_response.get("signal") not in ["BUY", "STRONG_BUY", "SELL", "STRONG_SELL"]:
+                    if analyst_response and analyst_response.get("signal") == "WAIT":
+                        print(f"Analyst says WAIT for {ticker}. Reasoning: {analyst_response.get('technical_thesis', 'No thesis provided.')}")
+                        # Optional: Log the WAIT decision to DB so user sees it
+                        wait_log = models.AgentLog(
+                            title=f"ANALYSIS: {ticker} - WAIT",
+                            content=f"Technical thesis suggests waiting.\nReasoning: {analyst_response.get('technical_thesis')}"
+                        )
+                        db.add(wait_log)
+                        db.commit()
                     continue
 
                 signal = analyst_response["signal"]

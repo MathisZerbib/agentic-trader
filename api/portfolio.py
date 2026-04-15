@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 import models
 from schemas import ClosePositionsRequest
+from services.state import trigger_state_broadcast
 
 router = APIRouter()
 

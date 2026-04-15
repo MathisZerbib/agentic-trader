@@ -48,7 +48,7 @@ async def call_local_llm(system_prompt, user_prompt):
             if LM_STUDIO_API_TOKEN:
                 request.add_header("Authorization", f"Bearer {LM_STUDIO_API_TOKEN}")
 
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.urlopen(request, timeout=180) as response:
                 response_data = json.loads(response.read().decode("utf-8"))
 
             choices = response_data.get("choices") or []
@@ -142,36 +142,7 @@ async def call_local_llm(system_prompt, user_prompt):
     print("All fallback attempts failed.")
     return {}
 
-async def get_active_local_model():
-    """
-    Fetches the currently loaded model(s) from LM Studio's /v1/models endpoint.
-    """
-    local_url = os.getenv("LOCAL_LLM_URL", "http://host.docker.internal:1234/v1")
-    # Clean up URL to get the base /v1 endpoint
-    if "/chat/completions" in local_url:
-        base_url = local_url.replace("/chat/completions", "")
-    else:
-        base_url = local_url.rstrip("/")
-
-    models_url = f"{base_url}/models"
-    
-    try:
-        def _fetch():
-            req = urllib.request.Request(models_url, method="GET")
-            if LM_STUDIO_API_TOKEN:
-                req.add_header("Authorization", f"Bearer {LM_STUDIO_API_TOKEN}")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                return data.get("data", [])
-        
-        models_data = await asyncio.to_thread(_fetch)
-        if models_data:
-            # Return the first available model ID
-            return models_data[0].get("id")
-    except Exception as e:
-        print(f"Failed to autodetect local model: {e}")
-    
-    return os.getenv("LOCAL_LLM_MODEL", "local-model")
+from services.llm_utils import get_active_local_model_async as get_active_local_model
 
 from agents.prompts import (
     STRATEGIST_SYSTEM_PROMPT, STRATEGIST_TASK_TEMPLATE,

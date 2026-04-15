@@ -9,6 +9,7 @@ from core.config import settings
 from api.system import router as system_router
 from api.portfolio import router as portfolio_router
 from api.ws import router as ws_router
+from api.llm import router as llm_router
 
 # Setup DB models (will move to alembic later ideally)
 models.Base.metadata.create_all(bind=engine)
@@ -44,6 +45,7 @@ def start_scheduler():
 app.include_router(system_router)
 app.include_router(portfolio_router)
 app.include_router(ws_router)
+app.include_router(llm_router)
 
 from services.state import get_current_state
 

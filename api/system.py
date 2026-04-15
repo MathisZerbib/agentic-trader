@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from database import get_db
 import models
-from schemas import LLMSettingsUpdateRequest
+from schemas import LLMSettingsUpdateRequest, LoadModelRequest
 
 
 import logging
@@ -139,4 +139,43 @@ async def update_llm_settings(payload: LLMSettingsUpdateRequest):
         "status": "LLM settings updated",
         **get_llm_settings(),
     }
+
+
+@router.post("/settings/llm/load-model")
+async def load_local_model(payload: LoadModelRequest):
+    """
+    Proxies a model load request to LM Studio.
+    """
+    base_url = _normalized_local_url(LLM_SETTINGS["local_url"])
+    load_url = f"{base_url}/models/load"
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer sk-lm-aAxaxZte:mOc432tNRd7CWCOh57g3"
+    }
+    
+    body = {
+        "model": payload.model,
+        "context_length": payload.context_length,
+        "flash_attention": payload.flash_attention,
+        "echo_load_config": True
+    }
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(load_url, json=body, headers=headers, timeout=120.0)
+            if r.status_code != 200:
+                logger.error(f"LM Studio load failed: {r.status_code} - {r.text}")
+                try:
+                    err_detail = r.json()
+                except:
+                    err_detail = r.text
+                raise HTTPException(status_code=r.status_code, detail=err_detail)
+            
+            return r.json()
+    except httpx.ConnectError:
+        raise HTTPException(status_code=503, detail="Could not connect to LM Studio")
+    except Exception as e:
+        logger.error(f"Unexpected error loading model: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
