@@ -59,6 +59,7 @@ def get_current_state(db: Session):
     return {
         "type": "state",
         "bot_active": bot_state["BOT_ACTIVE"],
+        "trading_locked": bot_state.get("TRADING_LOCKED", False),
         "market_status": market_status,
         "next_open": next_open,
         "next_close": next_close,

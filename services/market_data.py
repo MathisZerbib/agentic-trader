@@ -146,36 +146,29 @@ def _lmstudio_playwright_search(*, query: str, max_results: int, days: int) -> l
     if cached is not None:
         return cached
 
-    local_url = os.getenv("LOCAL_LLM_URL", "http://host.docker.internal:1234/v1/chat/completions")
-    # Clean url to root domain since native API uses /api/v1/chat
-    base_url = local_url.replace("/v1/chat/completions", "").replace("/v1", "")
-    if base_url.endswith("/"): base_url = base_url[:-1]
+    local_url = os.getenv("LOCAL_LLM_URL", "http://host.docker.internal:1234/v1")
+    # Clean url to root domain since native API uses /v1/responses or /api/v1/responses
+    base_url = local_url.replace("/chat/completions", "").replace("/v1", "").rstrip("/")
     
+    # Try /v1/responses (Most common)
     native_url = f"{base_url}/v1/responses"
     
     prompt = (
-        f"You have access to a Playwright MCP tool for web browsing.\n"
-        f"Please use your browser tool to search the web for the following query:\n"
-        f"'{query}'\n\n"
-        f"Analyze the search results for the last {days} days, and return exactly {max_results} relevant news articles or updates. "
-        "You MUST return ONLY a valid JSON array containing objects with these exact keys: "
-        "'title', 'url', 'content' (a brief summary), 'published_date', and 'domain'. Do not wrap the JSON output in markdown code blocks."
+        f"Search the web for the following query: '{query}'\n\n"
+        f"Analyze results from the last {days} days. Return exactly {max_results} updates. "
+        "Output ONLY a valid JSON array of objects with keys: 'title', 'url', 'content', 'published_date', 'domain'."
     )
     
-    messages = [
-        {"role": "system", "content": "You are a web research assistant. Output strictly a JSON array."},
-        {"role": "user", "content": prompt}
-    ]
-
     model_to_use = get_active_local_model_sync()
+    # LM Studio Responses API often expects 'input' instead of 'messages' for tool/plugin routing
     payload = {
         "model": model_to_use,
-        "messages": messages,
+        "input": prompt,
         "integrations": ["mcp/playwright"],
         "temperature": 0.2,
-        "context_length": 26000 # Increased to match user preference
+        "context_length": 20000
     }
-
+ 
     try:
         headers = {"Content-Type": "application/json"}
         if os.getenv("LM_STUDIO_API_KEY"):
@@ -183,6 +176,13 @@ def _lmstudio_playwright_search(*, query: str, max_results: int, days: int) -> l
             
         print(f"Calling LM Studio native responses API: {native_url} with integrations: mcp/playwright")
         response = requests.post(native_url, json=payload, headers=headers, timeout=_WEB_TIMEOUT_SECONDS)
+        
+        # If /v1/responses fails with 404 or "method not allowed", try /api/v1/responses
+        if response.status_code in [404, 405]:
+            alt_url = f"{base_url}/api/v1/responses"
+            print(f"Retrying with alternate API: {alt_url}")
+            response = requests.post(alt_url, json=payload, headers=headers, timeout=_WEB_TIMEOUT_SECONDS)
+
         response.raise_for_status()
         
         # /v1/responses returns choices like chat completions
@@ -193,7 +193,15 @@ def _lmstudio_playwright_search(*, query: str, max_results: int, days: int) -> l
         elif "output" in resp_data:
             for out in resp_data["output"]:
                 if out.get("type") == "message":
-                    raw_content += out.get("content", "")
+                    content_val = out.get("content", "")
+                    if isinstance(content_val, list):
+                        for c in content_val:
+                            if isinstance(c, dict) and "text" in c:
+                                raw_content += str(c["text"])
+                            else:
+                                raw_content += str(c)
+                    else:
+                        raw_content += str(content_val)
         else:
             raw_content = str(resp_data)
         

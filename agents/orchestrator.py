@@ -4,8 +4,8 @@ import json
 from datetime import datetime
 from core.config import settings
 from sqlalchemy.orm import Session
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 from core.clients import trading_client, data_client, grok_client, bot_state
 from api.ws import broadcast_ws_message
 from database import SessionLocal
@@ -20,6 +20,8 @@ from services.market_data import (
     shortlist_candidates_for_web_research, get_rsi
 )
 from alpaca.data.requests import StockSnapshotRequest
+
+trading_lock = asyncio.Lock()
 
 async def call_grok(system_prompt, user_prompt):
     if agents.USE_LOCAL_FALLBACK or not grok_client:
@@ -61,6 +63,23 @@ async def manage_existing_positions(db: Session = None):
         should_close = False
 
     try:
+        # 1. Cleanup stale pending orders (> 3 mins)
+        open_orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
+        for order in open_orders:
+            # Check age in seconds
+            age_seconds = (datetime.now(order.created_at.tzinfo) - order.created_at).total_seconds()
+            if age_seconds > 180: # 3 minutes
+                print(f"[AUDIT] Canceling stale order {order.id} for {order.symbol} (Age: {int(age_seconds)}s)")
+                trading_client.cancel_order_by_id(order.id)
+                
+                log = models.AgentLog(
+                    title=f"STALE ORDER CANCELED: {order.symbol}",
+                    content=f"Canceled pending order for {order.symbol} because it was older than 3 minutes ({int(age_seconds)}s)."
+                )
+                db.add(log)
+                db.commit()
+
+        # 2. Audit existing positions
         positions = trading_client.get_all_positions()
         for pos in positions:
             symbol = pos.symbol
@@ -129,8 +148,19 @@ async def manage_existing_positions(db: Session = None):
     finally:
         if should_close and db:
             db.close()
+    
+    # Check if we should refill positions (Opportunistic Homing)
+    if bot_state.get('BOT_ACTIVE', False):
+        try:
+            current_positions = trading_client.get_all_positions()
+            if len(current_positions) < 5:
+                print(f"[REFILL] Slots available ({len(current_positions)}/5). Triggering opportunistic trade hunt...")
+                # We use a task to avoid blocking the audit heartbeat
+                asyncio.create_task(autonomous_cycle(skip_audit=True))
+        except Exception as e:
+            print(f"Refill check failed: {e}")
 
-async def autonomous_cycle(db: Session = None, force: bool = False):
+async def autonomous_cycle(db: Session = None, force: bool = False, skip_audit: bool = False):
     print("DEBUG: starting autonomous cycle V2")
     if not bot_state.get('BOT_ACTIVE', False) and not force:
         print("Bot is paused. Skipping cycle.")
@@ -176,7 +206,8 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
                 return
 
         # --- POSITION AUDIT PHASE (Take Profit / Stop Loss) ---
-        await manage_existing_positions(db)
+        if not skip_audit:
+            await manage_existing_positions(db)
 
         # 1. GATHER DATA FOR REGIME ARBITER
         vix = 20.0 
@@ -237,14 +268,23 @@ async def autonomous_cycle(db: Session = None, force: bool = False):
                 primary_strategy = "Mean Reversion"
 
         # 2. ANALYST & ADVERSARIAL PHASE
-        current_positions = await asyncio.to_thread(trading_client.get_all_positions)
-        
-        open_positions_count = len(current_positions)
-        if open_positions_count >= 5:
-            print(f"Max concurrent trades (5) reached. Skipping new trade search.")
-            return
+        async with trading_lock:
+            if bot_state.get('TRADING_LOCKED', False):
+                print("TRADING IS LOCKED. Bypassing new trade search.")
+                return
+
+            current_positions = await asyncio.to_thread(trading_client.get_all_positions)
+            # Factor in pending BUY orders as already 'occupying' a slot to prevent over-trading
+            open_orders = await asyncio.to_thread(trading_client.get_orders, GetOrdersRequest(status=QueryOrderStatus.OPEN))
+            pending_buys = [o for o in open_orders if o.side == OrderSide.BUY]
             
-        remaining_slots = 5 - open_positions_count
+            total_slots_used = len(current_positions) + len(pending_buys)
+            
+            if total_slots_used >= 5:
+                print(f"Max concurrent trades (5) reached. (Positions={len(current_positions)}, Pending Buys={len(pending_buys)}). Skipping new trade search.")
+                return
+                
+            remaining_slots = 5 - total_slots_used
         
         candidates = await asyncio.to_thread(get_active_stocks, limit=10)
         if not candidates:

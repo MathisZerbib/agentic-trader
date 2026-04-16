@@ -73,6 +73,18 @@ async def stop_bot():
     await trigger_state_broadcast()
     return {"status": "Bot stopped", "bot_active": bot_state['BOT_ACTIVE']}
 
+@router.post("/bot/lock")
+async def lock_trading():
+    bot_state['TRADING_LOCKED'] = True
+    await trigger_state_broadcast()
+    return {"status": "Trading locked", "trading_locked": True}
+
+@router.post("/bot/unlock")
+async def unlock_trading():
+    bot_state['TRADING_LOCKED'] = False
+    await trigger_state_broadcast()
+    return {"status": "Trading unlocked", "trading_locked": False}
+
 
 @router.post("/run-agent")
 async def run_agent(db: Session = Depends(get_db)):
@@ -98,6 +110,7 @@ def get_llm_settings():
         "active_engine": _active_engine_label(),
         "openrouter_available": bool(grok_client),
         "position_monitor_interval_seconds": settings.POSITION_MONITOR_INTERVAL_SECONDS,
+        "trading_locked": bot_state.get("TRADING_LOCKED", False),
     }
 
 

@@ -41,8 +41,16 @@ scheduler.add_job(
     seconds=settings.POSITION_MONITOR_INTERVAL_SECONDS, 
     id='position_monitor'
 )
-# Main autonomous trading cycle (Full Agent Flow)
-scheduler.add_job(autonomous_cycle, 'cron', day_of_week='mon-fri', hour=9, minute=30, timezone='America/New_York', id='autonomous_cycle')
+# Main autonomous trading cycle (Full Agent Flow) - runs every 30 mins during week
+scheduler.add_job(
+    autonomous_cycle, 
+    'cron', 
+    day_of_week='mon-fri', 
+    hour='9-16', 
+    minute='0,30', 
+    timezone='America/New_York', 
+    id='autonomous_cycle'
+)
 
 @app.on_event("startup")
 def start_scheduler():

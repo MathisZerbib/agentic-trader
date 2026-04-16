@@ -26,5 +26,6 @@ elif settings.OPENROUTER_API_KEY:
 
 # Bot Status
 bot_state = {
-    "BOT_ACTIVE": True
+    "BOT_ACTIVE": True,
+    "TRADING_LOCKED": False
 }
