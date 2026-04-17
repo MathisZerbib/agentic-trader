@@ -160,13 +160,19 @@ def _lmstudio_playwright_search(*, query: str, max_results: int, days: int) -> l
     )
     
     model_to_use = get_active_local_model_sync()
-    # LM Studio Responses API often expects 'input' instead of 'messages' for tool/plugin routing
+    # LM Studio Responses API often expects 'input' instead of 'messages' for tool/plugin routing.
+    # The identifier should match the key in your LM Studio mcp.json (which is "playwright").
+    integration_id = "playwright" 
+    
     payload = {
         "model": model_to_use,
         "input": prompt,
-        "integrations": ["mcp/playwright"],
-        "temperature": 0.2,
-        "context_length": 20000
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "integrations": [integration_id, f"mcp/{integration_id}"],
+        "temperature": 0.0,
+        "context_length": 20480
     }
  
     try:

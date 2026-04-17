@@ -6,9 +6,9 @@ SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".data"
 
 # Default settings
 LLM_SETTINGS = {
-    "provider": "local" if settings.LOCAL_LLM_MODEL else "grok",
+    "provider": settings.LLM_PROVIDER if hasattr(settings, "LLM_PROVIDER") else "grok",
     "grok_model": settings.DEFAULT_GROK_MODEL,
-    "local_model": settings.LOCAL_LLM_MODEL,
+    "local_model": "local-model",
     "local_url": settings.LOCAL_LLM_URL,
     "position_monitor_interval_seconds": settings.POSITION_MONITOR_INTERVAL_SECONDS,
 }

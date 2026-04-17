@@ -3,6 +3,7 @@ import json
 import urllib.request
 import requests
 from core.config import settings
+from core.llm_settings import LLM_SETTINGS
 
 def get_active_local_model_sync():
     """
@@ -31,7 +32,7 @@ def get_active_local_model_sync():
     except Exception as e:
         print(f"Failed to autodetect local model (sync): {e}")
     
-    return os.getenv("LOCAL_LLM_MODEL", "local-model")
+    return LLM_SETTINGS.get("local_model", "local-model")
 
 async def get_active_local_model_async():
     """

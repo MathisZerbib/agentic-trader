@@ -5,8 +5,8 @@ load_dotenv()
 
 class Settings:
     LLM_PROVIDER = os.getenv("LLM_PROVIDER", "grok")
-    LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "local-model")
     LOCAL_LLM_URL = os.getenv("LOCAL_LLM_URL", "http://host.docker.internal:1234/v1")
+    LOCAL_LLM_MAX_CHARS = int(os.getenv("LOCAL_LLM_MAX_CHARS", "64000"))
     WEB_RESEARCH_ENABLED = os.getenv("WEB_RESEARCH_ENABLED", "true").lower() == "true"
     WEB_RESEARCH_MAX_TICKERS = int(os.getenv("WEB_RESEARCH_MAX_TICKERS", "3"))
     WEB_RESEARCH_MACRO_MAX_RESULTS = int(os.getenv("WEB_RESEARCH_MACRO_MAX_RESULTS", "6"))

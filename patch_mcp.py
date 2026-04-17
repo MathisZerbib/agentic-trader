@@ -85,7 +85,7 @@ lmstudio_func = r'''def _lmstudio_playwright_search(*, query: str, max_results: 
     if not url.endswith("/v1"): url += "/v1"
     
     payload = {
-        "model": os.getenv("LOCAL_LLM_MODEL", "local-model"),
+        "model": get_active_local_model_sync(),
         "messages": [
             {"role": "system", "content": "You are a web research assistant. Use your Playwright MCP tool to browse the internet. Output strictly a JSON array."},
             {"role": "user", "content": prompt}

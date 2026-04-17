@@ -7,7 +7,7 @@ from openai import AsyncOpenAI
 import urllib.request
 
 load_dotenv()
-LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "local-model")
+from core.llm_settings import LLM_SETTINGS
 LOCAL_LLM_URL = os.getenv("LOCAL_LLM_URL")
 DEFAULT_GROK_MODEL = os.getenv("GROK_MODEL", "x-ai/grok-4.1-fast")
 LM_STUDIO_API_TOKEN = os.getenv("LM_API_TOKEN") or os.getenv("LM_STUDIO_API_KEY")
@@ -71,12 +71,16 @@ async def call_local_llm(system_prompt, user_prompt):
 
             # First try with json_object, but be ready to fallback to text using standard truncation.
             try:
-                # Truncate inputs if they're too large for local models.
-                # Smaller models like Gemma 2b/4b often have limited context or stability issues with large prompts.
-                max_chars = 4000 if any(small in model_to_use.lower() for small in ["2b", "3b", "4b", "tiny"]) else 7000
+                # Modern local models (Gemma 2, Llama 3) typically handle 8k-32k context easily.
+                # We only truncate if it's extremely large to avoid OOM or slow responses on tiny hardware.
+                from core.config import settings
+                max_chars = settings.LOCAL_LLM_MAX_CHARS
+                if any(small in model_to_use.lower() for small in ["1b", "tiny"]):
+                    max_chars = 12000 # Keep limits for ultra-tiny models
+
                 if len(system_prompt) + len(user_prompt) > max_chars:
                     print(f"Truncating prompt for local model ({model_to_use}) context limit...")
-                    user_prompt = user_prompt[:max_chars - 2000] + "...(truncated)"
+                    user_prompt = user_prompt[:max_chars - len(system_prompt) - 500] + "...(truncated)"
 
                 payload = {
                     "model": model_to_use,
@@ -187,7 +191,8 @@ class BaseAgent:
             # Check for 402 Insufficient credits or generic API errors
             error_msg = str(e).lower()
             if "402" in error_msg or "insufficient credits" in error_msg:
-                print(f"LLM Error (402): {e}. PERMANENTLY Switching to fallback model ({LOCAL_LLM_MODEL}).")
+                fallback_model = LLM_SETTINGS.get("local_model", "local-model")
+                print(f"LLM Error (402): {e}. PERMANENTLY Switching to fallback model ({fallback_model}).")
                 USE_LOCAL_FALLBACK = True
                 return await call_local_llm(system_prompt, user_prompt)
             else:

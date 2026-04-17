@@ -3,6 +3,7 @@ import traceback
 import json
 from datetime import datetime
 from core.config import settings
+from core.llm_settings import LLM_SETTINGS
 from sqlalchemy.orm import Session
 from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
@@ -43,7 +44,8 @@ async def call_grok(system_prompt, user_prompt):
     except Exception as e:
         error_msg = str(e).lower()
         if "402" in error_msg or "insufficient credits" in error_msg:
-            print(f"Grok call failed (402): {e}. PERMANENTLY Switching to fallback model ({agents.LOCAL_LLM_MODEL}).")
+            fallback_model = LLM_SETTINGS.get("local_model", "local-model")
+            print(f"Grok call failed (402): {e}. PERMANENTLY Switching to fallback model ({fallback_model}).")
             agents.USE_LOCAL_FALLBACK = True
             return await agents.call_local_llm(system_prompt, user_prompt)
         else:
@@ -323,10 +325,19 @@ async def autonomous_cycle(db: Session = None, force: bool = False, skip_audit: 
                 # Combine news and sentiment for analysis
                 combined_perception = f"{news_prompt}\n{sentiment_prompt}\n{web_research_prompt}".strip()
 
-                # Optionally, pass this to the Analyst agent or use in trading logic
-                sentiment_agent = agents.SentimentAgent(grok_client, model=settings.DEFAULT_GROK_MODEL)
-                sentiment_result = await sentiment_agent.analyze_sentiment(ticker, combined_perception)
-                sentiment_analysis = f"Score: {sentiment_result.get('sentiment_score', 0)} | Narrative: {sentiment_result.get('narrative', 'N/A')}"
+                sentiment_analysis = "Score: 0 | Narrative: No data available."
+                
+                # Only call sentiment agent if we have meaningful content
+                if combined_perception and "No recent news found" not in combined_perception:
+                    sentiment_agent = agents.SentimentAgent(grok_client, model=settings.DEFAULT_GROK_MODEL)
+                    sentiment_result = await sentiment_agent.analyze_sentiment(ticker, combined_perception)
+                    
+                    if sentiment_result.get("status") in ["SUCCESS", "INSUFFICIENT_DATA"]:
+                        sentiment_analysis = f"Score: {sentiment_result.get('sentiment_score', 0)} | Narrative: {sentiment_result.get('narrative', 'N/A')}"
+                    else:
+                        sentiment_analysis = "Score: 0 | Narrative: Insufficient sentiment indicators."
+                else:
+                    print(f"Skipping Sentiment Agent for {ticker} (No data).")
 
                 order_flow_desc = "Neutral"
                 if hasattr(snap, 'latest_quote') and snap.latest_quote:
