@@ -12,6 +12,7 @@ from alpaca.data.timeframe import TimeFrame as BarTimeframe
 from alpaca.data.enums import MostActivesBy, DataFeed
 from datetime import datetime, timedelta
 from services.llm_utils import get_active_local_model_sync
+from playwright_market_data import playwright_market_data
 
 
 load_dotenv()
@@ -170,7 +171,7 @@ def _lmstudio_playwright_search(*, query: str, max_results: int, days: int) -> l
         "messages": [
             {"role": "user", "content": prompt}
         ],
-        "integrations": [integration_id, f"mcp/{integration_id}"],
+        "integrations": [integration_id, f"mcp/{integration_id}", f"mcp:{integration_id}"],
         "temperature": 0.0,
         "context_length": 20480
     }
@@ -256,17 +257,21 @@ def get_macro_web_research(max_results: int = 6, days: int = 2) -> list[dict[str
     return _lmstudio_playwright_search(query=query, max_results=max_results, days=days)
 
 
-def get_ticker_web_research(symbol: str, max_results: int = 5, days: int = 3) -> list[dict[str, Any]]:
-    query = (
-        f"{symbol} stock latest catalyst: earnings guidance, analyst upgrades downgrades, "
-        "SEC filings, product launches, litigation, outlook"
-    )
-    return _lmstudio_playwright_search(query=query, max_results=max_results, days=days)
+def get_ticker_web_research(symbol: str, max_results: int = 5, days: int = 3) -> str:
+    """
+    Uses the specialized playwright_market_data function to scrape Yahoo Finance 
+    for detailed metrics, analyst data, and news.
+    """
+    return playwright_market_data(symbol)
 
 
-def format_web_research_for_prompt(scope: str, results: list[dict[str, Any]], max_items: int = 6) -> str:
+def format_web_research_for_prompt(scope: str, results: Any, max_items: int = 6) -> str:
     if not results:
         return ""
+
+    if isinstance(results, str):
+        # If the result is already a formatted string report
+        return f"Web Research ({scope}):\n{results}"
 
     lines = [f"Web Research ({scope}):"]
     for item in results[:max_items]:

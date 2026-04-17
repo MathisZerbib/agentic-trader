@@ -132,7 +132,26 @@ lmstudio_func = r'''def _lmstudio_playwright_search(*, query: str, max_results: 
 
 content = re.sub(tavily_func, lmstudio_func, content, flags=re.DOTALL)
 
-content = content.replace("return _tavily_search(", "return _lmstudio_playwright_search(")
+# Add playwright_market_data import and ticker replacement
+content = "from playwright_market_data import playwright_market_data\n" + content
+content = content.replace(
+    'def get_ticker_web_research(symbol: str, max_results: int = 5, days: int = 3) -> list[dict[str, Any]]:',
+    'def get_ticker_web_research(symbol: str, max_results: int = 5, days: int = 3) -> str:'
+)
+content = content.replace(
+    'return _lmstudio_playwright_search(query=query, max_results=max_results, days=days)',
+    'return playwright_market_data(symbol)'
+)
+
+# Update format_web_research_for_prompt
+content = content.replace(
+    'def format_web_research_for_prompt(scope: str, results: list[dict[str, Any]], max_items: int = 6) -> str:',
+    'def format_web_research_for_prompt(scope: str, results: Any, max_items: int = 6) -> str:'
+)
+content = content.replace(
+    'if not results:',
+    'if not results:\n        return ""\n    if isinstance(results, str):\n        return f"Web Research ({scope}):\\n{results}"'
+)
 
 with open("backend/services/market_data.py", "w") as f:
     f.write(content)
