@@ -111,6 +111,12 @@ def get_llm_settings():
         "openrouter_available": bool(grok_client),
         "position_monitor_interval_seconds": settings.POSITION_MONITOR_INTERVAL_SECONDS,
         "trading_locked": bot_state.get("TRADING_LOCKED", False),
+        "take_profit_percentage": LLM_SETTINGS.get("take_profit_percentage", settings.TAKE_PROFIT_PERCENTAGE),
+        "stop_loss_percentage": LLM_SETTINGS.get("stop_loss_percentage", settings.STOP_LOSS_PERCENTAGE),
+        "daily_drawdown_threshold": LLM_SETTINGS.get("daily_drawdown_threshold", settings.DAILY_DRAWDOWN_THRESHOLD),
+        "web_research_enabled": LLM_SETTINGS.get("web_research_enabled", settings.WEB_RESEARCH_ENABLED),
+        "web_research_max_tickers": LLM_SETTINGS.get("web_research_max_tickers", settings.WEB_RESEARCH_MAX_TICKERS),
+        "web_research_days": LLM_SETTINGS.get("web_research_days", settings.WEB_RESEARCH_DAYS),
     }
 
 
@@ -163,6 +169,19 @@ async def update_llm_settings(payload: LLMSettingsUpdateRequest):
             print(f"Rescheduled position_monitor to {interval}s")
         except Exception as e:
             print(f"Failed to reschedule job: {e}")
+
+    if payload.take_profit_percentage is not None:
+        LLM_SETTINGS["take_profit_percentage"] = payload.take_profit_percentage
+    if payload.stop_loss_percentage is not None:
+        LLM_SETTINGS["stop_loss_percentage"] = payload.stop_loss_percentage
+    if payload.daily_drawdown_threshold is not None:
+        LLM_SETTINGS["daily_drawdown_threshold"] = payload.daily_drawdown_threshold
+    if payload.web_research_enabled is not None:
+        LLM_SETTINGS["web_research_enabled"] = payload.web_research_enabled
+    if payload.web_research_max_tickers is not None:
+        LLM_SETTINGS["web_research_max_tickers"] = payload.web_research_max_tickers
+    if payload.web_research_days is not None:
+        LLM_SETTINGS["web_research_days"] = payload.web_research_days
 
     _sync_local_llm_settings()
     await trigger_state_broadcast()

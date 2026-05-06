@@ -10,6 +10,12 @@ class LLMSettingsUpdateRequest(BaseModel):
     local_model: Optional[str] = None
     local_url: Optional[str] = None
     position_monitor_interval_seconds: Optional[int] = 60
+    take_profit_percentage: Optional[float] = None
+    stop_loss_percentage: Optional[float] = None
+    daily_drawdown_threshold: Optional[float] = None
+    web_research_enabled: Optional[bool] = None
+    web_research_max_tickers: Optional[int] = None
+    web_research_days: Optional[int] = None
 
 class LoadModelRequest(BaseModel):
     model: str

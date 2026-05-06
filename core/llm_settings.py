@@ -11,6 +11,12 @@ LLM_SETTINGS = {
     "local_model": "local-model",
     "local_url": settings.LOCAL_LLM_URL,
     "position_monitor_interval_seconds": settings.POSITION_MONITOR_INTERVAL_SECONDS,
+    "take_profit_percentage": settings.TAKE_PROFIT_PERCENTAGE,
+    "stop_loss_percentage": settings.STOP_LOSS_PERCENTAGE,
+    "daily_drawdown_threshold": settings.DAILY_DRAWDOWN_THRESHOLD,
+    "web_research_enabled": settings.WEB_RESEARCH_ENABLED,
+    "web_research_max_tickers": settings.WEB_RESEARCH_MAX_TICKERS,
+    "web_research_days": settings.WEB_RESEARCH_DAYS,
 }
 
 # Load from disk if exists

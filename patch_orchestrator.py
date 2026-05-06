@@ -1,67 +1,34 @@
 import re
+import os
 
-with open("backend/agents/orchestrator.py", "r") as f:
+ORCHESTRATOR_PATH = "backend/agents/orchestrator.py"
+
+if not os.path.exists(ORCHESTRATOR_PATH):
+    print(f"Error: {ORCHESTRATOR_PATH} not found.")
+    exit(1)
+
+with open(ORCHESTRATOR_PATH, "r") as f:
     content = f.read()
 
-# Fix the NameErrors for TAKE_PROFIT_PERCENTAGE
-content = content.replace("tp_threshold = TAKE_PROFIT_PERCENTAGE", "tp_threshold = settings.TAKE_PROFIT_PERCENTAGE")
-content = content.replace("sl_threshold = STOP_LOSS_PERCENTAGE", "sl_threshold = settings.STOP_LOSS_PERCENTAGE")
+# Replacements mapping
+replacements = {
+    "settings.TAKE_PROFIT_PERCENTAGE": 'LLM_SETTINGS.get("take_profit_percentage", 0.05)',
+    "settings.STOP_LOSS_PERCENTAGE": 'LLM_SETTINGS.get("stop_loss_percentage", -0.03)',
+    "settings.DAILY_DRAWDOWN_THRESHOLD": 'LLM_SETTINGS.get("daily_drawdown_threshold", -0.03)',
+    "settings.WEB_RESEARCH_ENABLED": 'LLM_SETTINGS.get("web_research_enabled", True)',
+    "settings.WEB_RESEARCH_MAX_TICKERS": 'LLM_SETTINGS.get("web_research_max_tickers", 3)',
+    "settings.WEB_RESEARCH_DAYS": 'LLM_SETTINGS.get("web_research_days", 3)',
+    "settings.WEB_RESEARCH_MACRO_MAX_RESULTS": 'LLM_SETTINGS.get("web_research_macro_max_results", 6)',
+    "settings.WEB_RESEARCH_TICKER_MAX_RESULTS": 'LLM_SETTINGS.get("web_research_ticker_max_results", 5)',
+}
 
-# Add the limitation counter to the candidate loop
-target_loop_start = """        if len(current_positions) >= 5:
-            print(f"Max concurrent trades (5) reached. Skipping new trade search.")
-            return
-            
-        candidates = get_active_stocks(limit=10)"""
+new_content = content
+for old, new in replacements.items():
+    new_content = new_content.replace(old, new)
 
-new_loop_start = """        open_positions_count = len(current_positions)
-        if open_positions_count >= 5:
-            print(f"Max concurrent trades (5) reached. Skipping new trade search.")
-            return
-            
-        remaining_slots = 5 - open_positions_count
-        
-        candidates = get_active_stocks(limit=10)"""
-
-content = content.replace(target_loop_start, new_loop_start)
-
-# In the actual order submission:
-order_submit = """                    try:
-                        order = trading_client.submit_order(order_data=order_data)
-                        print(f"Limit Order submitted: {order.id} at {limit_price}")
-                        
-                        # Log Trade
-                        trade = models.Trade("""
-
-new_order_submit = """                    try:
-                        order = trading_client.submit_order(order_data=order_data)
-                        print(f"Limit Order submitted: {order.id} at {limit_price}")
-                        
-                        remaining_slots -= 1
-                        
-                        # Log Trade
-                        trade = models.Trade("""
-content = content.replace(order_submit, new_order_submit)
-
-# At the end of the candidate loop
-order_end = """                        await broadcast_ws_message({
-                            "type": "trades",
-                            "data": [{"timestamp": str(datetime.datetime.now()), "symbol": trade.symbol, "side": trade.side, "qty": trade.qty, "price": trade.price}]
-                        })
-                    except Exception as e:
-                        print(f"Failed to submit order for {ticker}: {e}")"""
-
-new_order_end = """                        await broadcast_ws_message({
-                            "type": "trades",
-                            "data": [{"timestamp": str(datetime.datetime.now()), "symbol": trade.symbol, "side": trade.side, "qty": trade.qty, "price": trade.price}]
-                        })
-                        
-                        if remaining_slots <= 0:
-                            print("Reached max 5 open positions during cycle. Halting further trades.")
-                            break
-                    except Exception as e:
-                        print(f"Failed to submit order for {ticker}: {e}")"""
-content = content.replace(order_end, new_order_end)
-
-with open("backend/agents/orchestrator.py", "w") as f:
-    f.write(content)
+if new_content != content:
+    with open(ORCHESTRATOR_PATH, "w") as f:
+        f.write(new_content)
+    print(f"Successfully patched {ORCHESTRATOR_PATH}")
+else:
+    print(f"No changes needed for {ORCHESTRATOR_PATH}")

@@ -74,6 +74,11 @@ STEP 3: After executing that script, use `browser_evaluate` again to extract all
 }}
 STEP 4: Read the JSON data returned from the browser. You MUST output the metrics as a Markdown table with the columns "Metric" and "Value". Below the table, provide the Top News Headline and a formatted summary of the Analyst Insights.
 
+### ANTI-HALLUCINATION GUARDRAIL
+If you cannot access the page, the tool fails, or you are redirected to a page without the requested metrics, you MUST output exactly: "RESEARCH_UNAVAILABLE: [Reason]".
+NEVER simulate financial data. NEVER invent news. NEVER provide "representative" data. 
+If a specific metric is missing but others are found, use "N/A" for that metric only.
+
 USER REQUEST: Give me the metric table, news, and analyst breakdown for {stock_symbol} based on the current Yahoo Finance page."""
 
     payload = {

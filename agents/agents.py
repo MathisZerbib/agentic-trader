@@ -128,6 +128,12 @@ async def call_local_llm(system_prompt, user_prompt):
             if content.startswith("{{") and content.endswith("}}"):
                 content = content.replace("{{", "{").replace("}}", "}")
             
+            # --- ANTI-HALLUCINATION FILTER ---
+            simulation_triggers = ["i will simulate", "simulating the process", "representative set", "since you have not provided"]
+            if any(trigger in content.lower() for trigger in simulation_triggers):
+                print(f"⚠️ REJECTED SIMULATED RESPONSE from local model: {content[:100]}...")
+                return {}
+            
             return json.loads(content)
         except (json.JSONDecodeError, ValueError):
             # 2. Try regex-like finder for { ... }
@@ -184,7 +190,15 @@ class BaseAgent:
                 response_format={"type": "json_object"},
                 max_tokens=768
             )
-            return json.loads(response.choices[0].message.content)
+            content = response.choices[0].message.content
+            
+            # --- ANTI-HALLUCINATION FILTER ---
+            simulation_triggers = ["i will simulate", "simulating the process", "representative set", "since you have not provided"]
+            if any(trigger in content.lower() for trigger in simulation_triggers):
+                print(f"⚠️ REJECTED SIMULATED RESPONSE from Grok: {content[:100]}...")
+                return {}
+
+            return json.loads(content)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -295,7 +309,7 @@ class TradeReviewer(BaseAgent):
 from agents.prompts import POSITION_MONITOR_SYSTEM_PROMPT, POSITION_MONITOR_TASK_TEMPLATE
 
 class PositionMonitor(BaseAgent):
-    async def monitor_position(self, pos_data, market_context):
+    async def monitor_position(self, pos_data, market_context, rsi=None):
         prompt = POSITION_MONITOR_TASK_TEMPLATE.format(
             symbol=pos_data["symbol"],
             qty=pos_data["qty"],
@@ -304,6 +318,7 @@ class PositionMonitor(BaseAgent):
             unrealized_plpc=pos_data["unrealized_plpc"],
             tp_threshold=pos_data["tp_threshold"],
             sl_threshold=pos_data["sl_threshold"],
-            market_context=market_context
+            market_context=market_context,
+            rsi=rsi if rsi is not None else "N/A"
         )
         return await self._call_llm(POSITION_MONITOR_SYSTEM_PROMPT, prompt)

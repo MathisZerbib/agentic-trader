@@ -53,11 +53,28 @@ async def call_grok(system_prompt, user_prompt):
             print(f"Grok call failed: {e}")
             return {}
 
+def _is_market_open() -> bool:
+    """Returns True if the US equity market is currently open via Alpaca clock."""
+    if not trading_client:
+        return False
+    try:
+        clock = trading_client.get_clock()
+        return clock.is_open
+    except Exception as e:
+        print(f"[MARKET GUARD] Could not fetch clock: {e}")
+        return False
+
 async def manage_existing_positions(db: Session = None):
     """
     Audits all open positions and closes them if they hit Take Profit (5%) or Stop Loss (-3%).
+    Skips entirely when the market is closed to avoid unnecessary LLM/API calls.
     """
     if not trading_client: return
+
+    # --- Market Hours Guard ---
+    if not _is_market_open():
+        print("[POSITION MONITOR] Market is closed. Skipping position audit.")
+        return
 
     if not db:
         db = SessionLocal()
@@ -90,8 +107,8 @@ async def manage_existing_positions(db: Session = None):
             unrealized_plpc = float(pos.unrealized_plpc) if hasattr(pos, 'unrealized_plpc') else 0.0
             
             # TP/SL Thresholds
-            tp_threshold = settings.TAKE_PROFIT_PERCENTAGE
-            sl_threshold = settings.STOP_LOSS_PERCENTAGE
+            tp_threshold = LLM_SETTINGS.get("take_profit_percentage", 0.05)
+            sl_threshold = LLM_SETTINGS.get("stop_loss_percentage", -0.03)
             
             if unrealized_plpc >= tp_threshold or unrealized_plpc <= sl_threshold:
                 print(f"[AUDIT] {symbol} hit threshold ({round(unrealized_plpc*100, 2)}%). Calling PositionMonitor...")
@@ -107,9 +124,12 @@ async def manage_existing_positions(db: Session = None):
                 }
                 market_context = "High frequency audit. Decide FULL_CLOSE or PARTIAL_CLOSE based on profit."
                 
+                # Fetch current RSI for the position
+                pos_rsi = await asyncio.to_thread(get_rsi, symbol)
+                
                 monitor = agents.PositionMonitor(grok_client, model=settings.DEFAULT_GROK_MODEL)
                 try:
-                    decision = await monitor.monitor_position(pos_data, market_context)
+                    decision = await monitor.monitor_position(pos_data, market_context, rsi=pos_rsi)
                     if not decision: decision = {}
                     action = decision.get("action", "HOLD")
                     close_fraction = float(decision.get("close_fraction") or 1.0)
@@ -153,7 +173,7 @@ async def manage_existing_positions(db: Session = None):
             db.close()
     
     # Check if we should refill positions (Opportunistic Homing)
-    if bot_state.get('BOT_ACTIVE', False):
+    if bot_state.get('BOT_ACTIVE', False) and _is_market_open():
         try:
             current_positions = trading_client.get_all_positions()
             if len(current_positions) < 5:
@@ -194,7 +214,7 @@ async def autonomous_cycle(db: Session = None, force: bool = False, skip_audit: 
             daily_drawdown = (equity - last_equity) / last_equity if last_equity > 0 else 0
             
             # 0. GLOBAL CIRCUIT BREAKER (Kill Switch)
-            if daily_drawdown < settings.DAILY_DRAWDOWN_THRESHOLD:
+            if daily_drawdown < LLM_SETTINGS.get("daily_drawdown_threshold", -0.03):
                 # BYPASS: Allow if human-triggered AND no open positions (manual recovery)
                 open_positions = await asyncio.to_thread(trading_client.get_all_positions)
                 if force and len(open_positions) <= 3:
@@ -234,11 +254,11 @@ async def autonomous_cycle(db: Session = None, force: bool = False, skip_audit: 
                     news_summary += f"{s}: {n['title']} | "
 
             macro_web_summary = ""
-            if settings.WEB_RESEARCH_ENABLED:
+            if LLM_SETTINGS.get("web_research_enabled", True):
                 macro_web = await asyncio.to_thread(
                     get_macro_web_research,
-                    max_results=settings.WEB_RESEARCH_MACRO_MAX_RESULTS,
-                    days=min(settings.WEB_RESEARCH_DAYS, 3),
+                    max_results=LLM_SETTINGS.get("web_research_macro_max_results", 6),
+                    days=min(LLM_SETTINGS.get("web_research_days", 3), 3),
                 )
                 macro_web_summary = format_web_research_for_prompt("Macro", macro_web, max_items=5)
 
@@ -299,9 +319,9 @@ async def autonomous_cycle(db: Session = None, force: bool = False, skip_audit: 
                 candidates = ['AAPL', 'TSLA', 'NVDA', 'MSFT', 'AMD', 'META']
 
             web_research_symbols = set()
-            if settings.WEB_RESEARCH_ENABLED:
+            if LLM_SETTINGS.get("web_research_enabled", True):
                 web_research_symbols = set(
-                    shortlist_candidates_for_web_research(candidates, max_count=settings.WEB_RESEARCH_MAX_TICKERS)
+                    shortlist_candidates_for_web_research(candidates, max_count=LLM_SETTINGS.get("web_research_max_tickers", 3))
                 )
 
             for ticker in candidates:
@@ -324,8 +344,8 @@ async def autonomous_cycle(db: Session = None, force: bool = False, skip_audit: 
                         web_hits = await asyncio.to_thread(
                             get_ticker_web_research,
                             ticker,
-                            max_results=settings.WEB_RESEARCH_TICKER_MAX_RESULTS,
-                            days=settings.WEB_RESEARCH_DAYS,
+                            max_results=LLM_SETTINGS.get("web_research_ticker_max_results", 5),
+                            days=LLM_SETTINGS.get("web_research_days", 3),
                         )
                         # The call above blocks until playwright_market_data finishes
                         print(f"🔍 [WEB RESEARCH] {ticker}: Scraper finished. Proceeding with analysis.")

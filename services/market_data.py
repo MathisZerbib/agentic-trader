@@ -157,7 +157,10 @@ def _lmstudio_playwright_search(*, query: str, max_results: int, days: int) -> l
     prompt = (
         f"Search the web for the following query: '{query}'\n\n"
         f"Analyze results from the last {days} days. Return exactly {max_results} updates. "
-        "Output ONLY a valid JSON array of objects with keys: 'title', 'url', 'content', 'published_date', 'domain'."
+        "Output ONLY a valid JSON array of objects with keys: 'title', 'url', 'content', 'published_date', 'domain'.\n\n"
+        "### ANTI-HALLUCINATION GUARDRAIL\n"
+        "If you cannot access the web, the tool fails, or you find NO relevant data, you MUST return an empty array [].\n"
+        "NEVER simulate results. NEVER invent fake news. NEVER apologize or explain. Only [] is acceptable if no data exists."
     )
     
     model_to_use = get_active_local_model_sync()
